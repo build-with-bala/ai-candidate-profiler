@@ -36,11 +36,9 @@ browser instead of curl, first-run needs right-click → Open (unsigned binary),
 or use the bundled `run-macos.command`. Verify downloads against `SHA256SUMS`
 on the release page.
 
-3. It writes `ai-profile-<name>-<date>.html` in the current folder and opens
-   it. Review it, then send that one file back.
-
 **Privacy:** the profiler reads *aggregates only* — counts, timestamps, model
-and tool names, and prompt lengths. It never reads or transmits prompt text,
+and tool names, prompt lengths, and structural markers (code blocks, paths,
+list structure, constraint words). It never reads or transmits prompt text,
 code, file contents, credentials, or API keys. The report is a static file
 that makes no network requests. Add `--redact` to anonymize project names.
 
