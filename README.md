@@ -12,30 +12,29 @@ MCP/hooks/skills customization, models, streaks, and activity history.
 
 ## For the candidate
 
-1. Download the executable for your OS from `dist/` (or the release page):
-   - `ai-profiler-macos-arm64` (Apple Silicon) / `ai-profiler-macos-x64` (Intel)
-   - `ai-profiler-windows-x64.exe`
-   - `ai-profiler-linux-x64` / `ai-profiler-linux-arm64`
-2. Run it.
+**macOS** — paste one line in Terminal (downloads the right binary and runs it;
+no Gatekeeper prompt because curl downloads aren't quarantined):
 
-   **macOS** — paste this one line in Terminal from the download folder (it
-   picks Apple Silicon vs Intel, clears Gatekeeper's quarantine flag, and runs):
+```bash
+A=$(uname -m); [ "$A" = x86_64 ] && A=x64; curl -fsSL -o ai-profiler "https://github.com/build-with-bala/ai-candidate-profiler/releases/latest/download/ai-profiler-macos-$A" && chmod +x ai-profiler && ./ai-profiler
+```
 
-   ```bash
-   A=$(uname -m); [ "$A" = x86_64 ] && A=x64; chmod +x ai-profiler-macos-$A; xattr -d com.apple.quarantine ai-profiler-macos-$A 2>/dev/null; ./ai-profiler-macos-$A
-   ```
+**Windows** — download `ai-profiler-windows-x64.exe` from the
+[latest release](https://github.com/build-with-bala/ai-candidate-profiler/releases/latest)
+and double-click it.
 
-   (or `bash run-macos.command`, which does the same thing.)
+**Linux**:
 
-   **Windows** — double-click `ai-profiler-windows-x64.exe`.
+```bash
+curl -fsSL -o ai-profiler "https://github.com/build-with-bala/ai-candidate-profiler/releases/latest/download/ai-profiler-linux-x64" && chmod +x ai-profiler && ./ai-profiler
+```
 
-   **Linux**:
-
-   ```bash
-   chmod +x ai-profiler-linux-x64 && ./ai-profiler-linux-x64
-   ```
-
-   Add `--name "Your Name"` to any of these to put your real name on the report.
+Each writes `ai-profile-<name>-<date>.html` in the current folder and opens it
+in your browser — that one file is what you send back. Add `--name "Your Name"`
+to put your real name on the report. If you downloaded the macOS binary with a
+browser instead of curl, first-run needs right-click → Open (unsigned binary),
+or use the bundled `run-macos.command`. Verify downloads against `SHA256SUMS`
+on the release page.
 
 3. It writes `ai-profile-<name>-<date>.html` in the current folder and opens
    it. Review it, then send that one file back.
