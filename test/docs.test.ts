@@ -1,7 +1,8 @@
 // Public docs state formats and rules, never figures, local paths or other facts from the
-// owner's machine. This test walks docs/**/*.md and fails with one `file:line rule` entry per
-// violation. Code spans are inline backtick spans. D1–D5 and D7 skip fenced code blocks;
-// D6 reads every line, code included, because a path leaks from a code block too.
+// owner's machine, and never spell out a loader marker. This test walks docs/**/*.md and
+// fails with one `file:line rule` entry per violation. Code spans are inline backtick spans.
+// D1–D5 and D7 skip fenced code blocks; D6 and D8 read every line, code included, because a
+// path or a marker leaks from a code block too.
 //
 //   D1  On a line holding [measured] outside code spans, no digit remains outside code
 //       spans. Allowed: version tokens (v1, v0.38), phase and tier names (P0–P6), check
@@ -26,11 +27,16 @@
 //       "cannot test locally". Quoted product copy about the user's machine passes. A bare
 //       "this machine" and "here" in general are not checked: product requirements use
 //       them too ("whether it matches this machine", "binding here").
+//   D8  No loader marker that .github/workflows/security-guard.yml greps for, ignoring
+//       case; a doc says "the loader markers encoded in security-guard.yml" instead. The
+//       markers are decoded from the workflow's $'…' escapes at run time, so neither this
+//       file nor any doc holds one, and malware scanners never flag the repo for them.
+//       Markdown at the repo root (README.md) is held to D8 too.
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
-type Rule = "D1" | "D2" | "D3" | "D4" | "D5" | "D6" | "D7";
+type Rule = "D1" | "D2" | "D3" | "D4" | "D5" | "D6" | "D7" | "D8";
 interface Violation { line: number; rule: Rule }
 
 const ROOT = join(import.meta.dir, "..");
@@ -55,13 +61,13 @@ const FENCE = /^\s*(`{3,}|~{3,})(.*)$/;
 
 /** The fence marker that the line opens, or null. A backtick fence's info string holds no backtick. */
 function opensFence(line: string): string | null {
-  const m = FENCE.exec(line);
+  const m = line.match(FENCE);
   if (!m || (m[1][0] === "`" && m[2].includes("`"))) return null;
   return m[1];
 }
 
 function closesFence(line: string, open: string): boolean {
-  const m = FENCE.exec(line);
+  const m = line.match(FENCE);
   return m !== null && m[1][0] === open[0] && m[1].length >= open.length && m[2].trim() === "";
 }
 
@@ -137,6 +143,22 @@ function breaksD7(text: string): boolean {
   return MACHINE_FACT.test(withoutQuotes(text));
 }
 
+const GUARD_WORKFLOW = readFileSync(join(ROOT, ".github", "workflows", "security-guard.yml"), "utf8");
+
+/** The loader markers that the guard greps for, decoded from its `mN=$'…'` lines (\xHH escapes only), lower-cased. */
+function guardMarkers(workflow: string): string[] {
+  return [...workflow.matchAll(/^\s*m\d+=\$'([^']*)'/gm)].map((m) =>
+    m[1].replace(/\\x([0-9a-fA-F]{2})/g, (_, hex: string) => String.fromCodePoint(parseInt(hex, 16))).toLowerCase(),
+  );
+}
+
+const MARKERS = guardMarkers(GUARD_WORKFLOW);
+
+function breaksD8(line: string): boolean {
+  const lower = line.toLowerCase();
+  return MARKERS.some((marker) => lower.includes(marker));
+}
+
 /** Every violation in a Markdown document, one per line and rule, in line order. */
 function lint(markdown: string): Violation[] {
   const found: Violation[] = [];
@@ -146,6 +168,7 @@ function lint(markdown: string): Violation[] {
   markdown.split(/\r?\n/).forEach((raw, i) => {
     const flag = (rule: Rule) => found.push({ line: i + 1, rule });
     if (breaksD6(raw)) flag("D6");
+    if (breaksD8(raw)) flag("D8");
     if (fence !== null) {
       if (closesFence(raw, fence)) fence = null;
       return;
@@ -261,6 +284,22 @@ describe("doc rules, on made-up lines", () => {
     for (const line of bad) expect(rulesOf(line)).toEqual(["D7"]);
   });
 
+  test("D8: no loader marker, in code too and ignoring case; the guard's escaped spellings pass", () => {
+    expect(MARKERS).toHaveLength(8); // m1–m8 in security-guard.yml
+    for (const marker of MARKERS) {
+      expect(marker).not.toContain("\\"); // every escape decoded
+      expect(GUARD_WORKFLOW.toLowerCase()).not.toContain(marker); // the workflow holds only the escaped spelling
+      expect(rulesOf(`a plan that spells out ${marker} in prose`)).toEqual(["D8"]);
+      expect(rulesOf(`a marker in a code span: \`${marker}\``)).toEqual(["D8"]);
+      expect(rulesOf(["```text", marker.toUpperCase(), "```"].join("\n"))).toEqual(["D8"]);
+    }
+    const escaped = GUARD_WORKFLOW.split(/\r?\n/).filter((line) => /^\s*m\d+=\$'/.test(line));
+    expect(escaped).toHaveLength(8);
+    for (const line of [...escaped, "the loader markers encoded in `.github/workflows/security-guard.yml`"]) {
+      expect(rulesOf(line)).toEqual([]);
+    }
+  });
+
   test("fenced blocks: D1–D5 and D7 skip them, D6 reads them", () => {
     const fenced = ["```text", "this machine: 37 · R² · 3,000/4,000 · 41 days [measured] · on this Mac", "| Check | Rule | Baseline |", "```"];
     expect(rulesOf(fenced.join("\n"))).toEqual([]);
@@ -278,6 +317,15 @@ describe("docs", () => {
     const names = files.map((file) => relative(ROOT, file).split(sep).join("/"));
     expect(names).toContain("docs/superpowers/specs/2026-11-17-ai-leverage-suite-v2-design.md");
     const violations = files.flatMap((file, i) => lint(readFileSync(file, "utf8")).map((v) => `${names[i]}:${v.line} ${v.rule}`));
+    expect(violations).toEqual([]);
+  });
+
+  test("Markdown at the repo root spells out no loader marker either (D8)", () => {
+    const names = readdirSync(ROOT, { withFileTypes: true }).filter((e) => e.isFile() && e.name.endsWith(".md")).map((e) => e.name).sort();
+    expect(names).toContain("README.md");
+    const violations = names.flatMap((name) =>
+      readFileSync(join(ROOT, name), "utf8").split(/\r?\n/).flatMap((line, i) => (breaksD8(line) ? [`${name}:${i + 1} D8`] : [])),
+    );
     expect(violations).toEqual([]);
   });
 });

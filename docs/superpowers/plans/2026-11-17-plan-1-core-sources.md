@@ -80,7 +80,7 @@ test("VERSION matches package.json", () => {
 
 - [ ] **Step 5: CI workflows**
   - `.github/workflows/ci.yml`: on `push` and `pull_request`; `permissions: contents: read`; matrix `os: [ubuntu-latest, macos-latest, windows-latest]`; steps `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1` (v7.0.1), `oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6` (v2.2.0) with `bun-version: 1.3.11`, `bun install --frozen-lockfile`, `bun test`, `bunx tsc --noEmit`.
-  - `.github/workflows/security-guard.yml`: start from the `security-guard.yml` used in the owner's other repos; pin checkout to the SHA above; branches `[main]`; keep the fake-woff2 check and the two markers; add markers built with `$'…'` escapes so the file never contains them literally: `global.i=`, `_$jsoToArr`, `x-payload-b64`, `blockscout`, `api.trongrid.io`, `aptoslabs`; add a check that fails if any `.vscode/tasks.json` contains both `runOn` and `folderOpen`.
+  - `.github/workflows/security-guard.yml`: start from the `security-guard.yml` used in the owner's other repos; pin checkout to the SHA above; branches `[main]`; keep the fake-woff2 check and the two markers; add six more loader markers, each built with `$'…'` escapes so the file never contains them literally (the loader markers encoded in `.github/workflows/security-guard.yml` are the list; docs never spell one out); add a check that fails if any `.vscode/tasks.json` contains both `runOn` and `folderOpen`.
 
 - [ ] **Step 6: Commit, publish, verify CI**
 
