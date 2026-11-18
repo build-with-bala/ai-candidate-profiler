@@ -3,3 +3,7 @@ ai-profile-*.html
 ai-profile-*.json
 node_modules/
 .DS_Store
+*.aiprof
+*.dossier.html
+ai-profiler-console-*.html
+qa-out/

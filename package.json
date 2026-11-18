@@ -1,0 +1,20 @@
+{
+  "name": "ai-candidate-profiler",
+  "version": "2.0.0-dev",
+  "private": true,
+  "type": "module",
+  "corePin": {
+    "repo": "build-with-bala/ai-practice-report",
+    "sha": "",
+    "ref": ""
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "profiler": "bun src/cli.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}
