@@ -1,6 +1,7 @@
 // The company keystore (company.json) and the private home folder it lives in.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { Buffer } from "node:buffer";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensurePrivateDir, profilerHome, writePrivate, type ProfilerHome } from "../../src/home";
@@ -10,6 +11,9 @@ import { edFromSeed, fingerprint, xFromPriv, type Rand } from "../../src/trust/k
 import { testSys, VEC } from "../kit/keys";
 
 const POSIX = process.platform !== "win32";
+const PLATFORM = testSys("").platform;
+/** chmod does not bind root, so tests that make a folder read-only skip under it. */
+const ROOT_USER = process.getuid?.() === 0;
 const NOW = Date.UTC(2026, 10, 18, 9, 30, 0);
 const mode = (path: string): number => statSync(path).mode & 0o777;
 
@@ -38,6 +42,7 @@ describe("profilerHome", () => {
       company: join(root, "aiprof", "company.json"),
       invites: join(root, "aiprof", "invites.jsonl"),
       roles: join(root, "aiprof", "roles"),
+      platform: sys.platform,
     });
   });
 
@@ -50,23 +55,106 @@ describe("profilerHome", () => {
   });
 });
 
-describe("ensurePrivateDir and writePrivate", () => {
-  test.skipIf(!POSIX)("make a 0700 folder and 0600 files, tightening an existing loose file", () => {
+describe("ensurePrivateDir", () => {
+  test.skipIf(!POSIX)("makes every folder it creates 0700 and returns no warning", () => {
     const dir = join(root, "a", "b");
-    ensurePrivateDir(dir);
+    expect(ensurePrivateDir(dir, PLATFORM)).toEqual([]);
+    expect(mode(join(root, "a"))).toBe(0o700);
     expect(mode(dir)).toBe(0o700);
-    const file = join(dir, "f");
-    writeFileSync(file, "old");
-    chmodSync(file, 0o644);
-    writePrivate(file, "new");
-    expect(mode(file)).toBe(0o600);
-    expect(readFileSync(file, "utf8")).toBe("new");
-    writePrivate(join(dir, "g"), Uint8Array.of(1, 2));
-    expect(mode(join(dir, "g"))).toBe(0o600);
   });
 
-  test("writePrivate never creates folders", () => {
-    expect(() => writePrivate(join(root, "missing", "f"), "x")).toThrow();
+  test.skipIf(!POSIX)("never re-modes a folder that exists, and warns when others can enter it", () => {
+    // AIPROF_HOME=$HOME must never chmod the home folder.
+    const dir = join(root, "there");
+    mkdirSync(dir);
+    chmodSync(dir, 0o755);
+    expect(ensurePrivateDir(dir, PLATFORM)).toEqual([`${dir} can be read by other users; run chmod 700 ${dir}`]);
+    expect(mode(dir)).toBe(0o755);
+    chmodSync(dir, 0o710);
+    expect(ensurePrivateDir(dir, PLATFORM)).toHaveLength(1);
+    expect(mode(dir)).toBe(0o710);
+  });
+
+  test.skipIf(!POSIX)("leaves an existing parent alone when it creates a child", () => {
+    const parent = join(root, "parent");
+    mkdirSync(parent);
+    chmodSync(parent, 0o755);
+    expect(ensurePrivateDir(join(parent, "child"), PLATFORM)).toEqual([]);
+    expect(mode(parent)).toBe(0o755);
+    expect(mode(join(parent, "child"))).toBe(0o700);
+  });
+
+  test("accepts an existing 0700 folder without a warning", () => {
+    const dir = join(root, "there");
+    mkdirSync(dir, { mode: 0o700 });
+    if (POSIX) chmodSync(dir, 0o700);
+    expect(ensurePrivateDir(dir, PLATFORM)).toEqual([]);
+  });
+
+  test("takes the platform from Sys: on win32 it neither chmods nor warns", () => {
+    const dir = join(root, "loose");
+    mkdirSync(dir);
+    if (POSIX) chmodSync(dir, 0o755);
+    expect(ensurePrivateDir(dir, "win32")).toEqual([]);
+    if (POSIX) expect(mode(dir)).toBe(0o755);
+  });
+});
+
+describe("writePrivate", () => {
+  test.skipIf(!POSIX)("writes 0600 files, replacing an existing loose file with a 0600 one", () => {
+    const file = join(root, "f");
+    writeFileSync(file, "old");
+    chmodSync(file, 0o644);
+    writePrivate(file, "new", { platform: PLATFORM });
+    expect(mode(file)).toBe(0o600);
+    expect(readFileSync(file, "utf8")).toBe("new");
+    writePrivate(join(root, "g"), Uint8Array.of(1, 2), { platform: PLATFORM });
+    expect(mode(join(root, "g"))).toBe(0o600);
+    expect(readFileSync(join(root, "g"))).toEqual(Buffer.from([1, 2]));
+  });
+
+  test("replaces atomically through a temp file in the same folder, leaving no temp file behind", () => {
+    const file = join(root, "f");
+    writePrivate(file, "one", { platform: PLATFORM });
+    writePrivate(file, "two", { platform: PLATFORM });
+    expect(readFileSync(file, "utf8")).toBe("two");
+    expect(readdirSync(root)).toEqual(["f"]);
+  });
+
+  test.skipIf(!POSIX || ROOT_USER)("a failed write keeps the old file whole", () => {
+    const dir = join(root, "locked");
+    mkdirSync(dir);
+    const file = join(dir, "f");
+    writePrivate(file, "keep", { platform: PLATFORM });
+    chmodSync(dir, 0o500); // the temp file cannot be created
+    try {
+      expect(() => writePrivate(file, "lost", { platform: PLATFORM })).toThrow();
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    expect(readFileSync(file, "utf8")).toBe("keep");
+    expect(readdirSync(dir)).toEqual(["f"]);
+  });
+
+  test.skipIf(!POSIX)("replaces a symlink itself and never writes through it", () => {
+    const target = join(root, "target");
+    const link = join(root, "link");
+    symlinkSync(target, link); // dangling
+    writePrivate(link, "x", { platform: PLATFORM });
+    expect(lstatSync(link).isFile()).toBe(true);
+    expect(existsSync(target)).toBe(false);
+  });
+
+  test("exclusive refuses an existing file and leaves it unchanged", () => {
+    const file = join(root, "f");
+    writePrivate(file, "first", { platform: PLATFORM, exclusive: true });
+    expect(() => writePrivate(file, "second", { platform: PLATFORM, exclusive: true })).toThrow(expect.objectContaining({ code: "EEXIST" }));
+    expect(readFileSync(file, "utf8")).toBe("first");
+  });
+
+  test("never creates folders", () => {
+    expect(() => writePrivate(join(root, "missing", "f"), "x", { platform: PLATFORM })).toThrow();
+    expect(() => writePrivate(join(root, "missing", "f"), "x", { platform: PLATFORM, exclusive: true })).toThrow();
     expect(existsSync(join(root, "missing"))).toBe(false);
   });
 });
@@ -102,6 +190,41 @@ describe("initCompany", () => {
     expect(after).not.toBe(before);
     expect((JSON.parse(after) as CompanyFile).name).toBe("Other Co");
     expect(loadCompany(home, testSys(root))?.company).toEqual(replaced);
+    expect(readdirSync(home.dir)).toEqual(["company.json"]);
+  });
+
+  test.skipIf(!POSIX)("never writes through a dangling symlink at company.json", () => {
+    ensurePrivateDir(home.dir, PLATFORM);
+    const target = join(root, "elsewhere.json");
+    symlinkSync(target, home.company);
+    expect(() => initCompany(home, { name: "Example Co", now: NOW })).toThrow(/^exists$/);
+    expect(existsSync(target)).toBe(false);
+    initCompany(home, { name: "Example Co", now: NOW, force: true });
+    expect(lstatSync(home.company).isFile()).toBe(true);
+    expect(existsSync(target)).toBe(false);
+  });
+
+  test.skipIf(!POSIX || ROOT_USER)("a failed forced write keeps the existing keys", () => {
+    const c = initCompany(home, { name: "Example Co", now: NOW });
+    const before = readFileSync(home.company, "utf8");
+    chmodSync(home.dir, 0o500);
+    try {
+      expect(() => initCompany(home, { name: "Other Co", now: NOW, force: true })).toThrow();
+    } finally {
+      chmodSync(home.dir, 0o700);
+    }
+    expect(readFileSync(home.company, "utf8")).toBe(before);
+    expect(loadCompany(home, testSys(root))?.company).toEqual(c);
+  });
+
+  test.skipIf(!POSIX)("warns, and does not chmod, when the existing home folder is loose", () => {
+    mkdirSync(home.dir);
+    chmodSync(home.dir, 0o755);
+    const warnings: string[] = [];
+    initCompany(home, { name: "Example Co", now: NOW, warn: (w) => warnings.push(w) });
+    expect(warnings).toEqual([`${home.dir} can be read by other users; run chmod 700 ${home.dir}`]);
+    expect(mode(home.dir)).toBe(0o755);
+    expect(mode(home.company)).toBe(0o600);
   });
 
   test("rejects a name of 0 or 81 characters, or one holding a control character", () => {
@@ -128,7 +251,7 @@ describe("loadCompany", () => {
     initCompany(home, { name: "Example Co", now: NOW, rand: queue(VEC.t1.seed, VEC.bob.priv) });
     const f = JSON.parse(readFileSync(home.company, "utf8")) as CompanyFile;
     change(f);
-    writePrivate(home.company, JSON.stringify(f));
+    writePrivate(home.company, JSON.stringify(f), { platform: PLATFORM });
   }
 
   test("an edited public key or kid is inconsistent", () => {
@@ -160,7 +283,7 @@ describe("loadCompany", () => {
       expect(() => loadCompany(home, testSys(root))).toThrow(/^company\.json is (?:malformed|inconsistent)/);
       rmSync(home.company);
     }
-    writePrivate(home.company, "{not json");
+    writePrivate(home.company, "{not json", { platform: PLATFORM });
     expect(() => loadCompany(home, testSys(root))).toThrow(/^company\.json is malformed/);
   });
 
@@ -186,9 +309,4 @@ describe("loadCompany", () => {
     expect(loaded.ed).toEqual({ ...edFromSeed(unb64u(f.ed25519.seed)), kid: f.ed25519.kid });
     expect(loaded.x).toEqual({ ...xFromPriv(unb64u(f.x25519.priv)), kid: f.x25519.kid });
   });
-});
-
-test("ensurePrivateDir accepts a folder that already exists", () => {
-  mkdirSync(join(root, "there"));
-  expect(() => ensurePrivateDir(join(root, "there"))).not.toThrow();
 });

@@ -1,6 +1,6 @@
 // The company keystore, company.json: an Ed25519 key that signs invites and an X25519 key that bundles are sealed to.
 // Keys are strict b64u (F1) and each kid is fingerprint(pub) (F3). The file is 0600 in a 0700 folder on POSIX.
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import { ensurePrivateDir, writePrivate, type ProfilerHome, type Sys } from "../home";
 import { b64u, equalBytes, unb64u } from "./bytes";
 import { defaultRand, edFromSeed, fingerprint, newEdKey, newXKey, xFromPriv, type EdKey, type Rand, type XKey } from "./keys";
@@ -19,9 +19,14 @@ export function isCompanyName(name: unknown): name is string {
   return n >= 1 && n <= MAX_NAME && !CONTROL.test(name);
 }
 
-export function initCompany(h: ProfilerHome, o: { name: string; now: number; force?: boolean; rand?: Rand }): Company {
+/**
+ * Writes a new keystore. Without `force`, an existing company.json (or a symlink there, even a dangling one) is
+ * Error("exists") and is never touched. With `force`, the new file replaces the old one atomically, so a failed
+ * write keeps the old keys. `warn` receives the folder's loose-permission warning, if any.
+ */
+export function initCompany(h: ProfilerHome, o: { name: string; now: number; force?: boolean; rand?: Rand; warn?: (w: string) => void }): Company {
   if (!isCompanyName(o.name)) throw new Error(`the company name must be 1–${MAX_NAME} characters, with no control characters`);
-  if (!o.force && existsSync(h.company)) throw new Error("exists");
+  if (!o.force && lexists(h.company)) throw new Error("exists");
   const rand = o.rand ?? defaultRand;
   const ed = newEdKey(rand);
   const x = newXKey(rand);
@@ -33,9 +38,24 @@ export function initCompany(h: ProfilerHome, o: { name: string; now: number; for
     ed25519: { kid: company.ed.kid, pub: b64u(ed.pub), seed: b64u(ed.seed) },
     x25519: { kid: company.x.kid, pub: b64u(x.pub), priv: b64u(x.priv) },
   };
-  ensurePrivateDir(h.dir);
-  writePrivate(h.company, JSON.stringify(file, null, 2) + "\n");
+  for (const w of ensurePrivateDir(h.dir, h.platform)) o.warn?.(w);
+  try {
+    writePrivate(h.company, JSON.stringify(file, null, 2) + "\n", { platform: h.platform, exclusive: !o.force });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new Error("exists"); // created since the check above
+    throw e;
+  }
   return company;
+}
+
+/** True when anything is at `path`, a dangling symlink included. */
+function lexists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 class Malformed extends Error {
