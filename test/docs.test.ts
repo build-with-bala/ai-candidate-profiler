@@ -23,8 +23,9 @@
 //       test fixtures use.
 //   D7  Outside code spans and double-quoted strings (stripped only when a line's quotes
 //       pair up), no phrase states a fact about the machine: "this Mac" (also 's), "this
-//       machine's", "on/of/from this machine", "installed here", "untestable locally" or
-//       "cannot test locally". Quoted product copy about the user's machine passes. A bare
+//       machine's", "on/of/from this machine", "installed here", "untestable locally",
+//       "cannot test locally", "workspace CLAUDE.md", "owner's other repos" or "(local <digit>"
+//       (a locally installed version). Quoted product copy about the user's machine passes. A bare
 //       "this machine" and "here" in general are not checked: product requirements use
 //       them too ("whether it matches this machine", "binding here").
 //   D8  No loader marker that .github/workflows/security-guard.yml greps for, ignoring
@@ -131,7 +132,7 @@ function breaksD6(line: string): boolean {
 }
 
 const MACHINE_FACT =
-  /\bthis mac\b|\bthis machine['’]s\b|\b(?:on|of|from) this machine\b|\binstalled here\b|\buntestable locally\b|\bcan(?:not|['’]t) test locally\b/i;
+  /\bthis mac\b|\bthis machine['’]s\b|\b(?:on|of|from) this machine\b|\binstalled here\b|\buntestable locally\b|\bcan(?:not|['’]t) test locally\b|\bworkspace CLAUDE\.md\b|\bowner['’]s other repos\b|\(local \d/i;
 
 /** The text without its quoted strings, which hold product copy about the user's machine. Straight quotes are stripped only when they pair up. */
 function withoutQuotes(text: string): string {
@@ -269,6 +270,8 @@ describe("doc rules, on made-up lines", () => {
       "- the company fingerprint, with whether it matches this machine;",
       "the rule names `this Mac` and `on this machine` in code spans; no value from the owner's machine is kept",
       "a field confirmed “on this machine” is reworded; the rules are binding here",
+      "Bun ≥ 1.3 (CI pins `1.3.11`); the version (local `1.3.11`) sits in a code span; (local builds) and (locally 1.3) pass",
+      "the org rules live in the repo's CLAUDE.md; the guard is the one the owner's repos share",
     ];
     for (const line of ok) expect(rulesOf(line)).toEqual([]);
     const bad = [
@@ -280,6 +283,11 @@ describe("doc rules, on made-up lines", () => {
       "| Untestable locally (P2 tools) | fixtures from docs |",
       "the builder can't test locally",
       "a 5\" screen shows this machine's traces", // an unpaired quote strips nothing
+      "- **Org rules (from workspace CLAUDE.md):** feature branches",
+      "a guard as used in the owner's other repos.",
+      "a guard as used in the owner’s other repos.",
+      "Bun ≥ 1.3 (local 1.3.11), TypeScript",
+      "Node (local 22) for the build",
     ];
     for (const line of bad) expect(rulesOf(line)).toEqual(["D7"]);
   });

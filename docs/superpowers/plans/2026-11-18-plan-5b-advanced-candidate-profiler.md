@@ -485,7 +485,7 @@ export const ALLOW: { network: string[]; spawn: string[] };   // starts { networ
 
 - [ ] **Step 1: Check the precondition and branch.**
   1. Confirm with `gh pr list --state merged` that Plan 4's PR is merged into `main`.
-  2. Run the EtherHiding config scan (workspace CLAUDE.md), then `git fetch origin`, with the sandbox off. Confirm that Plan 4's merge commit is on `origin/main`. Never use the local `main`, which is the stale history from before the rewrite (Plan 4 G1).
+  2. Run the EtherHiding config scan, then `git fetch origin`, with the sandbox off. Confirm that Plan 4's merge commit is on `origin/main`. Never use the local `main`, which is the stale history from before the rewrite (Plan 4 G1).
   3. `git switch -c feat/v2-advanced origin/main` (pre-flight J1).
 - [ ] **Step 2: Read.**
   - The Plan 4 modules above, and B's installed `core/index.ts`, `core/exhibits/types.ts`, `core/analysis/{types,walk,tiers}.ts` and `core/privacy/allowlists.ts`.
