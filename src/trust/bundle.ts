@@ -3,6 +3,7 @@
 import type { ExportedPayload, ToolId } from "../payload/exported";
 import { CORE_PIN, VERSION } from "../version";
 import { b64u, unb64u } from "./bytes";
+import { isCompanyName } from "./company";
 import { TrustError } from "./errors";
 import { OPTIONAL_FIELDS, type Invite } from "./invite";
 import { jcsBytes, parseCanonical } from "./jcs";
@@ -73,10 +74,10 @@ export function assemble(i: AssembleInput): UnsignedBundle {
   const { forensics, ...rest } = value;
   const meta: BundleMeta = {
     profiler: VERSION,
-    // TODO(1b): CORE_VERSION and the pinned CORE_PIN.sha. Until the core is pinned, meta.core is the export's own
-    // `core` (B's VERSION, the value CORE_VERSION re-exports) and coreSha is 40 zeros.
+    // TODO(1b): CORE_VERSION. Until the core is pinned, meta.core is the export's own `core` (B's VERSION, the value
+    // CORE_VERSION re-exports).
     core: typeof value.core === "string" ? value.core : "",
-    coreSha: SHA40.test(CORE_PIN.sha) ? CORE_PIN.sha : UNPINNED_SHA,
+    coreSha: metaCoreSha(CORE_PIN.sha),
     createdAt: isoSecond(i.createdAt),
     keyId: i.signer.keyId,
     build: i.signer.build,
@@ -98,6 +99,16 @@ export function assemble(i: AssembleInput): UnsignedBundle {
   // The reader's own rules, so assemble never makes a bundle that readSigned would refuse.
   checkUnsigned(bundle as unknown as Record<string, unknown>);
   return bundle;
+}
+
+/**
+ * meta.coreSha for a corePin sha: the sha itself when it is 40 lower-case hex, and 40 zeros only while the core is
+ * not pinned yet (an empty sha). Any other value is a broken pin, which is an Error rather than a silent placeholder.
+ */
+export function metaCoreSha(pinSha: string): string {
+  if (pinSha === "") return UNPINNED_SHA;
+  if (!SHA40.test(pinSha)) throw new Error("package.json corePin.sha is not a 40-hex commit sha");
+  return pinSha;
 }
 
 /** The JCS bytes of the bundle without `signature` and `timestamp`; `"sealed": null` stays in (F5, pre-flight G2). */
@@ -194,9 +205,9 @@ function checkUnsigned(v: Record<string, unknown>): void {
   if (v.invite !== null && (typeof v.invite !== "string" || v.invite === "")) throw bad("invite is a token or null");
   const subject = v.subject;
   if (!isObject(subject) || !hasKeys(subject, ["name"])) throw bad("subject has exactly the key name");
-  if (subject.name !== null) {
-    const n = typeof subject.name === "string" ? [...subject.name].length : 0;
-    if (n < 1 || n > MAX_NAME) throw bad(`subject.name is null or 1–${MAX_NAME} characters`);
+  // The same rule as a company name: 1–80 code points, none of them a control character (so no ANSI escape or newline).
+  if (subject.name !== null && !isCompanyName(subject.name)) {
+    throw bad(`subject.name is null or 1–${MAX_NAME} characters, with no control characters`);
   }
   if (!isObject(v.payload)) throw bad("payload is an object");
   if (v.exhibits !== null && !isObject(v.exhibits)) throw bad("exhibits is an object or null");
@@ -208,7 +219,8 @@ function checkUnsigned(v: Record<string, unknown>): void {
   }
 }
 
-function checkMeta(m: unknown): void {
+/** F5's shape of `meta`; a sealed bundle's clear part carries the same meta (F6). */
+export function checkMeta(m: unknown): void {
   if (!isObject(m)) throw bad("meta is an object");
   const dev = m.build === "dev";
   if (!dev && m.build !== "release") throw bad("meta.build is release or dev");

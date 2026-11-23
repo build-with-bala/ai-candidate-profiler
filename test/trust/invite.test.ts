@@ -12,7 +12,8 @@ import {
 } from "../../src/trust/invite";
 import { appendInviteLog, readInviteLog, type InviteLogEntry } from "../../src/trust/invite-log";
 import { jcs } from "../../src/trust/jcs";
-import { edSign, sha256Hex, type Rand } from "../../src/trust/keys";
+import { edSign, sha256Hex } from "../../src/trust/keys";
+import { queueRand, v6Invite } from "../kit/bundles";
 import { codeOf, testCompany, testSys, VEC } from "../kit/keys";
 
 const POSIX = process.platform !== "win32";
@@ -27,27 +28,6 @@ const V6_CLAIMS_JCS =
   '"roleHash":"0000000000000000000000000000000000000000000000000000000000000000","sealTo":"3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hbeGdNrfx-FG-IK08","v":1}';
 const V6_SHA256 = "b4baae7ecda50ce5b41e4042b9eedda4f3466a120590735acffb140907d9b95e";
 const V6_SIG = "0bPyJilGau62BrkSdXlPzXo12bybMDMA0PV3q3fSGqyCHoDOzegxPHO9DzlbOsVzdJB45mziA0sxkdxPWhD5AA";
-
-/** A Rand that hands out these values in order, each of the length asked for. */
-function queue(...values: Uint8Array[]): Rand {
-  return (n) => {
-    const next = values.shift();
-    if (!next || next.length !== n) throw new Error("the queue rand ran dry");
-    return next;
-  };
-}
-
-function mintV6(): Invite {
-  return mintInvite(testCompany("Example Co"), {
-    role: "backend",
-    roleHash: "0".repeat(64),
-    now: Date.UTC(2026, 10, 17, 10, 0, 0),
-    expiresS: 14 * DAY,
-    fields: ["fingerprints", "exhibits"],
-    seal: true,
-    rand: queue(hex("a1b2c3d4e5f60718293a4b5c"), hex("000102030405060708090a0b0c0d0e0f")),
-  });
-}
 
 /** A token over these claims, signed by VEC.t1 (the testCompany key), with the claims written as `text`. */
 function signed(text: string): string {
@@ -82,7 +62,7 @@ describe("constants", () => {
 
 describe("V6", () => {
   test("mintInvite reproduces the token: claims JCS, 602 chars, SHA-256 and signature", () => {
-    const i = mintV6();
+    const i = v6Invite();
     const [prefix, seg, sig] = i.token.split(".");
     expect(prefix).toBe("aiprof-inv1");
     expect(Buffer.from(seg!, "base64url").toString("utf8")).toBe(V6_CLAIMS_JCS);
@@ -91,8 +71,16 @@ describe("V6", () => {
     expect(sig).toBe(V6_SIG);
   });
 
+  test("fields given out of order are sorted, so the token is the same", () => {
+    const i = mintInvite(testCompany("Example Co"), {
+      role: "backend", roleHash: "0".repeat(64), now: Date.UTC(2026, 10, 17, 10, 0, 0), expiresS: 14 * DAY, fields: ["fingerprints", "exhibits"], seal: true,
+      rand: queueRand(hex("a1b2c3d4e5f60718293a4b5c"), hex("000102030405060708090a0b0c0d0e0f")),
+    });
+    expect(i.token).toBe(v6Invite().token);
+  });
+
   test("parseInvite gives the claims, keys, display id and company fingerprint", () => {
-    const token = mintV6().token;
+    const token = v6Invite().token;
     const i = parseInvite(token);
     expect(i.token).toBe(token);
     expect(i.claims).toEqual(v6Claims() as unknown as InviteClaims);
@@ -133,7 +121,7 @@ describe("V6", () => {
 
 describe("tamper (F4 parsing)", () => {
   test("every one-character substitution in V6 is bad-invite", () => {
-    const token = mintV6().token;
+    const token = v6Invite().token;
     let cases = 0;
     for (let i = 0; i < token.length; i++) {
       for (const ch of ALPHABET) {
@@ -147,7 +135,7 @@ describe("tamper (F4 parsing)", () => {
   });
 
   test("each malformed shape is bad-invite", () => {
-    const token = mintV6().token;
+    const token = v6Invite().token;
     const [, seg, sig] = token.split(".");
     const cases: Record<string, string> = {
       "an extra . part": `${token}.AA`,
@@ -202,13 +190,13 @@ describe("tamper (F4 parsing)", () => {
   });
 
   test("a part that is not base64url says so in plain words", () => {
-    const [, seg, sig] = mintV6().token.split(".");
+    const [, seg, sig] = v6Invite().token.split(".");
     expect(messageOf(() => parseInvite(`${INVITE_PREFIX}.${seg}!.${sig}`))).toBe("not a valid invite: the claims part is not a base64url value");
     expect(messageOf(() => parseInvite(`${INVITE_PREFIX}.${seg}.${sig}AA`))).toBe("not a valid invite: the signature is not a 64-byte base64url value");
   });
 
   test("errors never repeat the token", () => {
-    const token = mintV6().token;
+    const token = v6Invite().token;
     const [, seg] = token.split(".");
     for (const t of [token + "x", `aiprof-inv2.${seg}.AA`, signed('{"role":"' + "q".repeat(40) + '"}')]) {
       let message = "no throw";
@@ -225,7 +213,7 @@ describe("tamper (F4 parsing)", () => {
 });
 
 describe("inviteStatus (Review Focus 1)", () => {
-  const i = mintV6();
+  const i = v6Invite();
   const { iat, exp } = i.claims;
   test("is valid in [iat − 300 s, exp], expired after exp, not yet valid before iat − 300 s", () => {
     expect(inviteStatus(i, exp * 1000)).toBe("valid");

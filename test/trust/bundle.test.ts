@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
 import { b64u, fromUtf8, utf8 } from "../../src/trust/bytes";
 import {
-  assemble, BUNDLE_BUDGET, BUNDLE_READ_MAX, bundleBytes, checkSignature, dossierNo, FORMAT, payloadHash, readSigned, signBundle, signingInput,
+  assemble, BUNDLE_BUDGET, BUNDLE_READ_MAX, bundleBytes, checkSignature, dossierNo, FORMAT, metaCoreSha, payloadHash, readSigned, signBundle, signingInput,
   type AssembleInput, type SignedBundle,
 } from "../../src/trust/bundle";
 import { TrustError } from "../../src/trust/errors";
@@ -12,7 +12,7 @@ import { jcs, jcsBytes } from "../../src/trust/jcs";
 import { fingerprint, sha256Hex } from "../../src/trust/keys";
 import { filterPayload, REQUIRED_KEYS, SECTION_KEYS } from "../../src/trust/sections";
 import { resolveSigner } from "../../src/trust/signer";
-import { VERSION } from "../../src/version";
+import { CORE_PIN, VERSION } from "../../src/version";
 import { PERSONA_CREATED_AT, personaBundle, personaExhibits, personaExport, seeded, v6Invite, vectorBundle, vectorUnsigned } from "../kit/bundles";
 import { codeOf, testCompany, testSigner, VEC } from "../kit/keys";
 
@@ -173,12 +173,21 @@ describe("assemble (expert persona)", () => {
 
   test("meta: versions from src/version.ts, createdAt in UTC to the second, the subject's name and the exclusions", () => {
     const u = assemble(input({ createdAt: PERSONA_CREATED_AT + 999, name: "Ada", exclusions: { tools: 1, projects: 2, sessions: 3 } }));
-    expect(u.meta).toEqual({ profiler: VERSION, core: "1.0.0", coreSha: expect.stringMatching(/^[0-9a-f]{40}$/), createdAt: "2026-11-18T10:42:07Z", keyId: "test-39f713d0", build: "release" });
+    expect(u.meta).toEqual({ profiler: VERSION, core: "1.0.0", coreSha: CORE_PIN.sha || "0".repeat(40), createdAt: "2026-11-18T10:42:07Z", keyId: "test-39f713d0", build: "release" });
     expect(u.subject).toEqual({ name: "Ada" });
     expect(u.exclusions).toEqual({ tools: 1, projects: 2, sessions: 3 });
     expect(u.timestamp).toBeNull();
     expect(u.sealed).toBeNull();
     expect(u.format).toBe("aiprof/2");
+  });
+
+  test("coreSha is the pinned sha, 40 zeros only while the pin is empty, and an Error for any other pin", () => {
+    expect(assemble(input()).meta.coreSha).toBe(CORE_PIN.sha || "0".repeat(40));
+    expect(metaCoreSha("")).toBe("0".repeat(40));
+    expect(metaCoreSha("0123456789abcdef0123456789abcdef01234567")).toBe("0123456789abcdef0123456789abcdef01234567");
+    for (const pin of ["main", "0".repeat(39), "0".repeat(41), "0123456789ABCDEF0123456789ABCDEF01234567", " ".repeat(40)]) {
+      expect(() => metaCoreSha(pin)).toThrow("package.json corePin.sha is not a 40-hex commit sha");
+    }
   });
 
   test("a dev signer sets devKey to its public key; a release signer does not", () => {
@@ -199,6 +208,9 @@ describe("assemble (expert persona)", () => {
     expect(() => assemble(input({ exported: { ...exported, value: [] } }))).toThrow();
     expect(codeOf(() => assemble(input({ name: "" })))).toBe("bad-format");
     expect(codeOf(() => assemble(input({ name: "x".repeat(81) })))).toBe("bad-format");
+    expect(codeOf(() => assemble(input({ name: "\u001b[31mAda\u001b[0m" })))).toBe("bad-format");
+    expect(codeOf(() => assemble(input({ name: "Ada\nLovelace" })))).toBe("bad-format");
+    expect(codeOf(() => assemble(input({ name: "Ada\u0085" })))).toBe("bad-format");
   });
 });
 
@@ -250,10 +262,12 @@ describe("readSigned's shape check (F5)", () => {
     "an empty subject name": (o) => { o.subject.name = ""; },
     "an 81-character subject name": (o) => { o.subject.name = "x".repeat(81); },
     "an extra subject key": (o) => { o.subject.email = null; },
+    "a subject name holding an ANSI escape": (o) => { o.subject.name = "\u001b[2J\u001b[31mAda"; },
+    "a subject name holding a newline": (o) => { o.subject.name = "Ada\nLovelace"; },
     "a payload that is an array": (o) => { o.payload = []; },
     "integrity null": (o) => { o.integrity = null; },
     "exhibits that are a string": (o) => { o.exhibits = "x"; },
-    "a top level that is an array": (o) => { Object.keys(o).forEach((k) => delete o[k]); },
+    "an empty top-level object": (o) => { Object.keys(o).forEach((k) => delete o[k]); },
   };
 
   test("each malformed shape is bad-format", () => {
@@ -274,6 +288,27 @@ describe("readSigned's shape check (F5)", () => {
     const dev = readSigned(edited(b, (o) => { o.meta.build = "dev"; o.meta.devKey = b64u(VEC.t1.pub); }));
     expect(dev.meta.devKey).toBe(b64u(VEC.t1.pub));
     expect(checkSignature(dev, VEC.t2.pub)).toBe(false); // the meta changed, so the signature no longer holds
+  });
+});
+
+describe("dropped sections stay dropped", () => {
+  test("a section re-added to a bundle whose invite left it out, then re-canonicalized, no longer verifies", () => {
+    const { bundle } = personaBundle("expert", { invite: inviteFor(["stack"]) });
+    expect(bundle.payload).not.toHaveProperty("signals");
+    expect(checkSignature(bundle, VEC.t2.pub)).toBe(true);
+    const signals = (personaExport("expert").value as Record<string, unknown>).signals;
+    const readded = readSigned(edited(bundle, (o) => { o.payload.signals = signals; }));
+    expect(readded.payload.signals).toEqual(signals);
+    expect(checkSignature(readded, VEC.t2.pub)).toBe(false);
+  });
+
+  test("fingerprints added to a bundle whose invite did not request them no longer verify", () => {
+    const { bundle } = personaBundle("expert", { invite: inviteFor(["exhibits"]) });
+    expect(bundle.fingerprints).toEqual([]);
+    const fps = [{ fp: "c1f6af6c44d0ef639be976ee2e3f111d", day: "2026-11-02", tool: "claude-code", size: "L" }];
+    const readded = readSigned(edited(bundle, (o) => { o.fingerprints = fps; }));
+    expect(readded.fingerprints).toEqual(fps as SignedBundle["fingerprints"]);
+    expect(checkSignature(readded, VEC.t2.pub)).toBe(false);
   });
 });
 

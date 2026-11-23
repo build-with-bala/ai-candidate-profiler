@@ -5,7 +5,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { Buffer } from "node:buffer";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensurePrivateDir, profilerHome, writePrivate, type ProfilerHome } from "../../src/home";
+import { ensurePrivateDir, profilerHome, writePrivate, writePrivateWithTempNames, type ProfilerHome } from "../../src/home";
 import { b64u, unb64u } from "../../src/trust/bytes";
 import { initCompany, loadCompany, type CompanyFile } from "../../src/trust/company";
 import { edFromSeed, fingerprint, xFromPriv, type Rand } from "../../src/trust/keys";
@@ -158,7 +158,7 @@ describe("writePrivate", () => {
     const names = [join(root, ".f.taken.tmp"), join(root, ".f.taken.tmp"), join(root, ".f.free.tmp")];
     writeFileSync(names[0]!, "stale");
     const asked: number[] = [];
-    writePrivate(file, "new", { platform: PLATFORM, tempName: (attempt) => (asked.push(attempt), names[attempt]!) });
+    writePrivateWithTempNames(file, "new", { platform: PLATFORM }, (attempt) => (asked.push(attempt), names[attempt]!));
     expect(asked).toEqual([0, 1, 2]);
     expect(readFileSync(file, "utf8")).toBe("new");
     expect(readFileSync(names[0]!, "utf8")).toBe("stale");
@@ -169,9 +169,16 @@ describe("writePrivate", () => {
     const file = join(root, "f");
     writeFileSync(file, "keep");
     writeFileSync(join(root, ".f.taken.tmp"), "stale");
-    expect(() => writePrivate(file, "lost", { platform: PLATFORM, tempName: () => join(root, ".f.taken.tmp") }))
+    expect(() => writePrivateWithTempNames(file, "lost", { platform: PLATFORM }, () => join(root, ".f.taken.tmp")))
       .toThrow(expect.objectContaining({ code: "EEXIST" }));
     expect(readFileSync(file, "utf8")).toBe("keep");
+  });
+
+  test("production callers cannot replace the temp names: writePrivate has no tempName option", () => {
+    const file = join(root, "f");
+    // @ts-expect-error tempName is not a writePrivate option; only the @internal writePrivateWithTempNames takes one.
+    writePrivate(file, "x", { platform: PLATFORM, tempName: () => join(root, ".f.chosen.tmp") });
+    expect(readdirSync(root)).toEqual(["f"]);
   });
 
   test("the default temp name is unpredictable: a file at the old <pid>.<count> name never collides", () => {
@@ -270,6 +277,17 @@ describe("initCompany", () => {
     const c = initCompany(home, { name: "Other Co", now: NOW, force: true });
     expect(loadCompany(home, testSys(root))?.company).toEqual(c);
     expect(readdirSync(home.dir).sort()).toEqual([".company.json.bak", "company.json", "notes.txt"]);
+  });
+
+  test("force skips a folder that has a temp file's name: no EISDIR, the keys are replaced and the folder is left alone", () => {
+    initCompany(home, { name: "Example Co", now: NOW });
+    mkdirSync(join(home.dir, ".company.json.123.1.tmp"));
+    writeFileSync(join(home.dir, ".company.json.123.1.tmp", "inside"), "mine");
+    writeFileSync(join(home.dir, ".company.json.99.4.tmp"), "an old key copy");
+    const c = initCompany(home, { name: "Other Co", now: NOW, force: true });
+    expect(loadCompany(home, testSys(root))?.company).toEqual(c);
+    expect(readdirSync(home.dir).sort()).toEqual([".company.json.123.1.tmp", "company.json"]);
+    expect(readFileSync(join(home.dir, ".company.json.123.1.tmp", "inside"), "utf8")).toBe("mine");
   });
 
   test("without force, a stale temp file changes nothing: an existing keystore is still exists", () => {

@@ -53,11 +53,14 @@ export function initCompany(h: ProfilerHome, o: { name: string; now: number; for
   return company;
 }
 
-/** Removes the `.company.json.*.tmp` files a crashed write left behind: each holds a copy of a private key. */
+/**
+ * Removes the `.company.json.*.tmp` files a crashed write left behind: each holds a copy of a private key. A folder
+ * with such a name was not made by writePrivate, so it is skipped and never aborts the forced write.
+ */
 function removeStaleTemps(h: ProfilerHome): void {
   const prefix = `.${basename(h.company)}.`;
-  for (const f of readdirSync(dirname(h.company))) {
-    if (f.startsWith(prefix) && f.endsWith(".tmp")) rmSync(join(dirname(h.company), f), { force: true });
+  for (const f of readdirSync(dirname(h.company), { withFileTypes: true })) {
+    if (!f.isDirectory() && f.name.startsWith(prefix) && f.name.endsWith(".tmp")) rmSync(join(dirname(h.company), f.name), { force: true });
   }
 }
 

@@ -47,25 +47,29 @@ function defaultTempName(path: string): string {
  * Writes the whole file at 0600 and never creates folders.
  * - By default the bytes go to a temp file in the same folder, which is renamed over `path`. A failed write never
  *   touches the old file, and a symlink at `path` is replaced, never written through. A temp name that is taken is
- *   retried with a fresh one. `tempName` replaces the name generator (tests only).
+ *   retried with a fresh one.
  * - `exclusive` creates `path` itself and fails with EEXIST when anything, even a dangling symlink, is there. A failed
  *   write removes the partial file.
  */
-export function writePrivate(
-  path: string,
-  data: string | Uint8Array,
-  o: { platform: Sys["platform"]; exclusive?: boolean; tempName?: (attempt: number) => string },
-): void {
+export function writePrivate(path: string, data: string | Uint8Array, o: { platform: Sys["platform"]; exclusive?: boolean }): void {
   const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
-  if (o.exclusive) {
-    writeNew(path, bytes, o.platform);
-    return;
-  }
-  const name = o.tempName ?? (() => defaultTempName(path));
+  if (o.exclusive) writeNew(path, bytes, o.platform);
+  else replaceAtomically(path, bytes, o.platform, () => defaultTempName(path));
+}
+
+/**
+ * @internal Tests only: writePrivate's atomic replace with `tempName` in place of the random name generator, so a
+ * test can make a name collide. Production code calls writePrivate, which takes no name.
+ */
+export function writePrivateWithTempNames(path: string, data: string | Uint8Array, o: { platform: Sys["platform"] }, tempName: (attempt: number) => string): void {
+  replaceAtomically(path, typeof data === "string" ? new TextEncoder().encode(data) : data, o.platform, tempName);
+}
+
+function replaceAtomically(path: string, bytes: Uint8Array, platform: Sys["platform"], name: (attempt: number) => string): void {
   for (let attempt = 0; ; attempt++) {
     const temp = name(attempt);
     try {
-      writeNew(temp, bytes, o.platform);
+      writeNew(temp, bytes, platform);
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "EEXIST" && attempt + 1 < TEMP_ATTEMPTS) continue;
       throw e;
