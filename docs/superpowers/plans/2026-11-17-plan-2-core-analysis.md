@@ -119,7 +119,7 @@ These are Plan 1's constraints as amended during its execution, plus this plan's
   - The two windows are never summed.
 - ✚ Analysis keeps per-session sufficient statistics, never per-event copies. It must not multiply the resident event cost; Task 15 enforces this.
 
-**Performance:** a cold scan plus analyze of the real local history takes ≤ 60 s, with peak RSS ≤ 1 GiB. Task 16 enforces this.
+**Performance:** a cold scan plus analyze of the real local history takes ≤ 60 s, with peak RSS ≤ 1 GiB. Task 16 enforces this. The 1 GiB budget stands as the acceptance bar; the adaptive pacer's rule (Task 15) is under revision to meet it (ruling, memory budget).
 
 **Signals:** ✚ a trapped SIGINT or SIGTERM ends the process by that signal once every active scan has cleaned up, so no post-scan code runs. A second signal ends it at once. Task 0D enforces this.
 
@@ -1824,6 +1824,7 @@ export type CheckStatus = "pass" | "note" | "warn" | "fail" | "n/a" | "info";
 export type CheckId = "C1" | "C2" | "C3" | "C4" | "C5" | "C6" | "C7" | "C8" | "C9" | "C10"
   | "soft:rhythm" | "soft:repeated-long" | "soft:recent-burst" | "soft:unclosed-tools" | "soft:new-config";
 export interface CheckResult { id: CheckId; status: CheckStatus; n: number; reason: string; values: Record<string, number | string>; askAbout?: string; tools: ToolId[] }
+  // Task 13b closes `reason` to the `Reason` union and `values` to `CheckValues` (ruling, Task 13b)
 export function checkAnchors(raw: ScanResult): [CheckResult, CheckResult];    // C1, C2
 export function checkClaudeHistory(raw: ScanResult, t: SessionTable): CheckResult;   // C3
 export function checkAccount(raw: ScanResult): CheckResult;                   // C4
@@ -2011,7 +2012,14 @@ export interface Analysis {
     models: Record<string, number> /* raw model id → count, pre-flight P13 */ };
 }
 export function analyze(raw: ScanResult, o?: AnalyzeOptions): Analysis;
+export class ExclusionError extends RangeError {}   // an exclude.projects entry that names no label or key (ruling, Task 13)
 ```
+- **Exclusions fail closed** (ruling, Task 13). An `exclude.projects` entry is a label, matched without regard to letter case, or a projectKey, matched exactly. An entry that names neither throws `ExclusionError`: a typo must never silently exclude nothing. Its message quotes the entry only when it has the shape of a label or key.
+- **An exclusion leaks nothing** (ruling, Task 13):
+  - `identity` keeps a session-scope hash only when its session is a kept row (not excluded by project or date, no host copy). Config-scope hashes, and session hashes that name no session, are kept per kept tool.
+  - `coverage` rows' `from`/`to` are clipped to the date range: a span that starts before the range tells a reader that earlier data exists.
+  - `diagnostics.warnings` drops the warnings of excluded tools.
+  - Forensics reads in-scope data only (Task 13b).
 
 **Order of work:**
 1. Defaults and the reference table.
@@ -2035,14 +2043,15 @@ The result is plain data. It contains no `Map`, `Set`, class instance or functio
   - **Determinism:** `analyze(personaScan("expert"))` run twice is deep-equal; `JSON.parse(JSON.stringify(a))` deep-equals `a`; a walker finds only finite numbers.
   - **Every metric has its meta:** every object with a numeric or null `value` also has `window`, `n` and `sources`.
   - **Canaries:** `expectNoCanaries({ ...a, private: undefined })` on `personaScan("expert", { canaries: true })`, whose config names, cwds and model ids embed canaries (pre-flight P13). With `allow` empty, the canaries appear only under `private`.
-  - **Exclusions:** excluding the expert's busiest project by label gives `exclusions.projects === 1`, and that project's sessions are gone.
+  - **Exclusions:** excluding the expert's busiest project by label gives `exclusions.projects === 1`, and that project's sessions are gone. The exclusion tests also assert identity, coverage, warnings and projects; an analyze-level date-range test does the same; an unknown project entry throws `ExclusionError` (ruling, Task 13).
   - **Review Focus 1:**
     - **Empty `ScanResult`:**
       - every dimension is `insufficient` or `not-measurable`, with `n` and `needs`;
       - `overall.status` is `insufficient` and `forensics.band` is `unverifiable`;
       - nothing is NaN.
-    - **Lifetime-only `ScanResult`:** exposure has tenure and weeks, and every detail dimension is `insufficient`.
-  - **Review Focus 3:** `personaScan("intermediate", { hourUtc: 0 })` under UTC and under `Pacific/Auckland`. Every component other than `orc.headless`, `jud.switches` and `del.prs` has an equal `x`.
+    - **Lifetime-only `ScanResult`:** exposure has tenure and weeks, and every detail dimension is `insufficient`. The test pins the statuses and a finite `n` (ruling, Task 13).
+  - **Review Focus 3:** `personaScan("intermediate", { hourUtc: 0 })` under UTC and under `Pacific/Auckland`. Every component other than `orc.headless`, `jud.switches` and `del.prs` has an equal `x`. The test also proves the zone matters: `dayParts` differ, at an hour where the local date differs (ruling, Task 13).
+  - **No flaky clocks** (ruling, Task 13): the `computeSignals` budget test's 2 s wall-clock bound becomes a bound that cannot flake on a slow runner.
 - [ ] **Step 2: Run** `bun test test/core/analyze.test.ts` → FAIL.
 - [ ] **Step 3: Implement** `analyze()` and the exports.
 - [ ] **Step 4: Run** `bun test && bunx tsc --noEmit` → PASS.
@@ -2050,11 +2059,67 @@ The result is plain data. It contains no `Map`, `Set`, class instance or functio
 
 ---
 
+### Task 13b: Forensics over in-scope data; closed vocabularies and the question function
+
+This task was added during execution (ruling, Task 13). An exclusion must not leak what it excludes, so the integrity band describes only the data the report is built from. Task 14 also needs closed lists, so that no English text leaves the machine (ruling, Task 14).
+
+**Files:**
+- Create: `core/forensics/{scope,questions}.ts`, `test/core/forensics/{scope,questions,types,exclusions}.test.ts`
+- Modify: every `core/forensics/*.ts` check, `core/forensics/{types,index}.ts`, `core/analysis/promptwindow.ts` and its test
+
+**Interfaces:**
+```ts
+// core/forensics/scope.ts
+export interface ForensicScope { /* the in-scope view: tools, range and session rules, one list per kind, computed on first use */ }
+export function forensicScope(raw: ScanResult, t: SessionTable): ForensicScope;
+// core/forensics/types.ts — closed, typed vocabularies: a new code or key fails the compiler
+export type Reason = "ok" | "ok-history-only" | "ok-stats-only" | "no-data" | "too-few" | "unknown-marker" | "scheme-changed" | …;   // every code a check or soft flag gives
+export const REASONS: Readonly<Record<Reason, true>>;
+export type ProvenanceKey = `${ToolId}/${Origin}/${Window}`;   // C10's keys
+export type ValueKey = FixedKey | ProvenanceKey;               // FixedKey: the closed list of every other check's keys, `date` among them
+export type CheckValues = { [K in ValueKey]?: K extends typeof DATE_KEY ? string : number };   // the only string is a YYYY-MM-DD under `date`
+export const VALUE_KEYS: Readonly<Record<ValueKey, true>>;
+export type ValueKind = "count" | "share" | "corr" | "ratio" | "date";
+export const VALUE_KINDS: Readonly<Record<ValueKey, ValueKind>>;   // ONE kind table: the question function and the export schema both read it
+export const DATE_KEY = "date";
+export function isDay(x: unknown): x is string;
+export function isValueOf(kind: ValueKind, x: unknown): boolean;
+export interface CheckResult { id: CheckId; status: CheckStatus; n: number; reason: Reason; values: CheckValues; askAbout?: string; tools: ToolId[] }
+// core/forensics/questions.ts
+export function questionFor(id: unknown, reason: unknown, values: unknown): string | undefined;   // CheckResult.askAbout is made by it
+```
+
+**Rules.**
+- **In-scope data** (ruling, Task 13). `forensicScope` is the one place that decides it. An excluded tool's events reach no check, and a dated event outside the range reaches no check. An event that names a session counts only when that session is a kept row with no host copy; that is how a project exclusion and host copies apply. An event that names no session is kept by tool and date.
+- **Orphans, per kind** (ruling, Task 13b). Where the named session is not in the store:
+  - tool calls and session account hashes are out of scope, as in `core/analysis/scope.ts` and `Analysis.identity`;
+  - a detail prompt is out and a lifetime prompt stays, since history outlives its sessions (the scope helper's rule);
+  - rollouts stay: a rollout nobody can account for is exactly what C6 exists to catch.
+- **Thread rows** follow the session rule like rollouts: `threadId` is the session id (ruling, Task 13b).
+- **Prompt window** (ruling, Task 13b). `promptWindowByTool` counts only in-scope human prompts, by the scope helper's full human rule. So exposure, panels and forensics all choose a tool's window without the excluded slice, and orphan or host-copy prompts never win the choice.
+- **Closed vocabularies** (ruling, Task 13b). Every values object is type-checked where it is built (`satisfies CheckValues`, or a typed fresh literal), and a compile-time test pins that an unlisted key is rejected.
+- **The question function trusts nothing** (ruling, Task 13b), since the hiring app calls it on a bundle the candidate controls. It returns undefined unless the id and reason are known strings, the date is a real `YYYY-MM-DD`, and every number it uses is finite, in range and of the expected kind. It formats numbers itself and never throws.
+- **Side-preserving rounding** (ruling, Task 13b). A stored value that a check compares with a threshold is rounded to stay on the same side as the exact value: down for "below" and "at least" rules, up for "above" and "at most" rules. Each question shows its number rounded the same way: rho to 3 decimals down; a share as a whole percentage down, or with one decimal up for an "above" rule. A result never shows a number on the passing side of the rule it failed.
+- **Only C5 carries a day** (ruling, Task 13b). No other check, recent-burst included, carries a day-level date; their questions are worded from numbers alone. The export allows nothing finer than an ISO week except the file-time dates.
+
+- [ ] **Step 1: Write the failing tests.**
+  - `exclusions.test.ts`: excluding a tool, a project or a date range gives each check equal to the world without that slice; the orphan rules above; a tool whose only session is a host copy is in no check; an excluded project's prompts do not decide a tool's window.
+  - `scope.test.ts`: the scope rules one at a time.
+  - `types.test.ts`: an unlisted values key, or a string under a key other than `date`, fails to compile.
+  - `questions.test.ts`: invalid values (a crafted date, NaN, a huge number, a share outside 0..1) and non-string or throwing ids and reasons each give undefined, never a throw; the rounding sides per rule.
+  - Every forensics test that produces check results asserts, over ALL its results, that each reason and values key is in the closed lists and that `askAbout === questionFor(id, reason, values)` (ruling, Task 13b).
+- [ ] **Step 2: Run** `bun test test/core/forensics test/core/analysis/promptwindow.test.ts` → FAIL.
+- [ ] **Step 3: Implement** the scope, the vocabularies and the question function, and move every check onto them.
+- [ ] **Step 4: Run** `bun test && bunx tsc --noEmit` → PASS.
+- [ ] **Step 5: Commit** `fix(forensics): checks read in-scope data only; closed reasons, values and questions`.
+
+---
+
 ### Task 14: Privacy layer — allowlisted `aiprof/2` export
 
 **Files:**
 - Create: `core/privacy/{schema,export,allowlists,jcs}.ts`, `test/core/privacy/{schema,export,jcs}.test.ts`, `test/core/privacy/__snapshots__/` (generated)
-- Modify: `core/index.ts` (exports `exportPayload`, `ExportOptions`, `canonicalJson`)
+- Modify: `core/index.ts` (exports `exportPayload`, `ExportOptions`, `canonicalJson`, `ExportError`, `RevealError`, and, in their own block, the forensics vocabularies `REASONS`, `VALUE_KEYS`, `VALUE_KINDS`, `DATE_KEY`, `isDay`, `isValueOf` and `questionFor` with their types (ruling, Task 14))
 
 **Interfaces:**
 ```ts
@@ -2063,23 +2128,29 @@ The result is plain data. It contains no `Map`, `Set`, class instance or functio
 export function canonicalJson(v: unknown): string;
 // schema.ts
 export type Sensitivity = "public" | "aggregate" | "pseudonymous" | "revealed";
-export type FieldSpec =
-  | { t: "number" | "integer" | "boolean"; s: Sensitivity } | { t: "enum"; values: readonly string[]; s: Sensitivity }
+export type FieldSpec =   // (ruling, Task 14: count, bounded, day, optional, variant and tuple added)
+  | { t: "number" | "integer" | "count" | "boolean"; s: Sensitivity } | { t: "bounded"; min: number; max: number; s: Sensitivity }
+  | { t: "day"; s: Sensitivity } | { t: "optional"; of: FieldSpec } | { t: "variant"; tag: string; cases: Readonly<Record<string, FieldSpec>> }
+  | { t: "enum"; values: readonly string[]; s: Sensitivity }
   | { t: "string"; pattern: RegExp; s: Sensitivity } | { t: "nullable"; of: FieldSpec }
-  | { t: "array"; of: FieldSpec; max: number } | { t: "object"; fields: Readonly<Record<string, FieldSpec>> }
-  | { t: "record"; key: RegExp; of: FieldSpec; maxKeys: number };
+  | { t: "array"; of: FieldSpec; max: number } | { t: "tuple"; of: readonly FieldSpec[] } | { t: "object"; fields: Readonly<Record<string, FieldSpec>> }
+  | { t: "record"; key: RegExp; of: FieldSpec; maxKeys: number; fields?: Readonly<Record<string, FieldSpec>> };
 export const AIPROF2: FieldSpec;
 export function sanitize(value: unknown, spec: FieldSpec): unknown;   // deny by default: drops undeclared keys and values failing type, pattern or enum; truncates arrays
+export function violations(value: unknown, spec: FieldSpec, at?: string, out?: string[]): string[];   // JSON paths where value does not fit; empty when sanitize keeps it whole (ruling, Task 14)
 // allowlists.ts
 export const MCP_PUBLIC: ReadonlySet<string>;     // exactly: github, gitlab, git, filesystem, fetch, memory, time, sequential-thinking, playwright, puppeteer, context7, sentry, linear, atlassian, slack, postgres, sqlite, supabase, stripe, cloudflare, vercel, docker, kubernetes, figma, brave-search
 export function mcpExportName(raw: string): string | undefined;   // lower-case; strip "@scope/", "server-", "mcp-", "-mcp"; a public name or undefined
 export function mcpLabels(config: Analysis["private"]["config"]): Map<string, string>;   // mcp-server entries: key → public name (mcpExportName), else "custom #n" in keyed-hash order; the export's config.mcpServers and B's anonymized report both use it (P3 pre-flight F15)
-export function modelExportId(raw: string): string;  // /^(claude|gpt|o\d|gemini|codex|grok|llama|mistral|qwen|deepseek)[a-z0-9.\-]{0,40}$/ kept; "ft:" → "fine-tuned"; else "other"
+export function modelExportId(raw: string): string;  // "ft:" → "fine-tuned"; a public id of a known family kept; another id of a known family → "<family>-other"; else "other" (ruling, Task 14; rule below)
 // no surfaceExport: no exported field carries a surface, so surfaces never leave the machine (pre-flight P15)
 // export.ts
 export interface ExportOptions { schema: "aiprof/2"; reveal?: Array<{ label: string; name: string }> }
 export interface ExportResult { schema: "aiprof/2"; value: unknown; json: string; bytes: number }
-export function exportPayload(a: Analysis, o: ExportOptions): ExportResult;
+export function exportPayload(a: Analysis, o: ExportOptions): ExportResult;   // throws ExportError, never returns a partial payload (ruling, Task 14)
+export type ExportStage = "options" | "reveal" | "build" | "check" | "serialize";
+export class ExportError extends Error { readonly paths: readonly string[]; readonly stage: ExportStage }   // names JSON paths only, never a value
+export class RevealError extends ExportError {}   // a reveal label that names no exported project
 ```
 
 **Payload `aiprof/2`.** The tables list each field, its form and its sensitivity class: `pub` (public), `agg` (aggregate), `ps` (pseudonymous), `rev` (revealed).
@@ -2091,11 +2162,11 @@ export function exportPayload(a: Analysis, o: ExportOptions): ExportResult;
 | `schema` | "aiprof/2" | pub |
 | `core` | version | pub |
 | `reference` | "v0" | pub |
-| `coverage[]` | {tool, window, status, beta, from/to as YYYY-MM, sessions, prompts, formatChanged} | agg |
+| `coverage[]` | {tool, window, statuses, beta, from/to as YYYY-MM, sessions, prompts, formatChanged}; `statuses` is its sources' statuses as a sorted list of enums, not one worst status, and no source names (ruling, Task 14) | agg |
 | `overall` | {status, score, interval, band, coverage} | agg |
-| `dimensions[]` | {id, status, score, interval, openTail, confidence, n, needs, window, components[]{id, status, x, z, n, weight}}; `x` and `z` rounded to 4 decimals (pre-flight P22) | agg |
+| `dimensions[]` | {id, status, score, interval, openTail, confidence, n, needs, part, window, components[]{id, status, x, z, n, weight}}; `x` and `z` rounded to 4 decimals (pre-flight P22); `part` is the binding evidence part (ruling, Task 14) | agg |
 | `personas[]` | role names | pub |
-| `signals` | every `Metric` as {value, n, window, from/to as YYYY-MM} | agg |
+| `signals` | every `Metric` as {value, n, window, from/to as YYYY-MM, reason}; `reason` is present when `value` is null (ruling, Task 14) | agg |
 
 *Panels*
 
@@ -2113,9 +2184,25 @@ export function exportPayload(a: Analysis, o: ExportOptions): ExportResult;
 
 | Field | Form | Class |
 |---|---|---|
-| `forensics` | {band, serverBacked, anchorable, notAnchorable, checks[]{id, status, reason, values (numbers; C5 date), askAbout}} | agg |
+| `forensics` | {band, serverBacked, anchorable, notAnchorable, checks[]{id, status, reason, n, tools, values}}; each check is exactly these six fields, with no question text (ruling, Task 14) | agg |
 | `identity` | {accounts, bindings[]} — keyed hashes | ps |
 | `exclusions` | counts | agg |
+
+**No English text leaves the machine** (ruling, Task 14). A check's `reason` is one of the forensics `REASONS`, and its `values` are closed over `VALUE_KEYS`, each typed by the forensics `VALUE_KINDS` table: a count, a share in 0..1, a correlation in −1..1, or a day. Only C5's values may hold the `date`. The reading side rebuilds each question with `questionFor(id, reason, values)`, the same function that makes `CheckResult.askAbout`.
+
+**The export fails closed** (ruling, Task 14). A payload that claims more than the data supports must never be signed.
+- `exportPayload` builds a draft, then compares it with the schema. If the schema would drop or change anything, it throws `ExportError`, whose `paths` name JSON paths only, never a value. A record key is shown only when it fits that record's key pattern, else a placeholder.
+- Every failure is an `ExportError`, with its `stage`. An unexpected exception while building becomes one at the `build` stage, without its own message, since that may quote data.
+- Fields are required unless the schema marks them `optional`, as the real types do. A missing or undefined required field throws; a nullable field stays present as `null`.
+- A fixed-length tuple, such as an interval, is all or nothing.
+- Every count is a non-negative safe integer. A sum over folded entries fails as soon as one input is not. A NaN in an optional field throws instead of vanishing. Shares and weights are range-checked to 0..1.
+- Caps are applied by the builder, which folds the overflow into `other` (models) or `otherProjects`; it never truncates or skips an entry silently, but passes it on, so the comparison throws.
+- A `reveal` label that names no exported project throws `RevealError`. Label matching ignores case, and the last entry for a label wins.
+
+**Model ids** (ruling, Task 14). The rule stops ACCIDENTAL disclosure of a deployment or customer name that rides on a public family prefix (`gpt-4o-contoso-prod`). It is not a defence against a person who deliberately encodes data in their own model ids: they control their own machine and their own export.
+- `ft:` → `fine-tuned`. Characters other than a–z, 0–9, `.` and `-`, or more than 64 of them → `other`. An unknown family → `other`.
+- After a known family, at most 6 hyphen-separated tokens. Each is a word from a fixed list of public tier and variant words; one of at most 2 versions (1–2 digits, or 1–3 with the size suffix `b`; at most a 1-digit fraction; no leading zero; the optional `o` suffix); or part of the one real date, in a public form (`YYYYMMDD`, `YYYY-MM-DD` as three tokens, or `MMDD`). Such an id is kept as is.
+- Any other id of a known family → `<family>-other`. An enumerated list of every public version was rejected, since each new model would read `<family>-other` until the tool is updated.
 
 **Tool names.** Tool-call names are never exported; the payload carries categories, checks and toolchains only. That is how "tool names → built-ins only" holds.
 
@@ -2132,14 +2219,16 @@ export function exportPayload(a: Analysis, o: ExportOptions): ExportResult;
   - **export:**
     1. **Canaries end to end.** All Plan 1 builders, plus a git repo with canaries, go through `scan`, `analyze` and `exportPayload`. Then `expectNoCanaries(result.json)` passes with no `allow`.
     2. **Raw channels** (no surface case, since no exported field carries a surface: pre-flight P15):
-       - model `ft:gpt-4o:acme:x:y` → `"fine-tuned"`;
+       - model `ft:gpt-4o:acme:x:y` → `"fine-tuned"`; `gpt-4o-contoso-prod` → `"gpt-other"`, and the model counts fold their overflow into `other` (ruling, Task 14);
        - an MCP server named `CANARY.mcp` → `"custom #1"`, while `github` stays `github`, and `mcpLabels` gives the same two labels (P3 pre-flight F15);
        - no `idTail`, session id or `projectKey` string appears in the JSON.
-    3. **Reveal:** `reveal: [{label, name:"my-lib"}]` puts `name` on that project only. Without `reveal`, no name appears.
+    3. **Reveal:** `reveal: [{label, name:"my-lib"}]` puts `name` on that project only. Without `reveal`, no name appears. A label that names no exported project throws `RevealError` (ruling, Task 14).
     4. **No fine timestamps:** no day parts, no 13-digit epoch, and no `T\d\d:` timestamp in the JSON.
     5. **Preview contract:** `JSON.parse(result.json)` deep-equals `result.value`, and `result.bytes === Buffer.byteLength(result.json)`.
     6. **Deny by default:** a property added to `analysis.dimensions[0]` is not exported.
-    7. **Golden snapshot:** the intermediate persona with a fixed salt, `now`, seed and `TZ=UTC` gives `expect(result.json).toMatchSnapshot()`. Every exported `x` and `z` has at most 4 decimals (pre-flight P22).
+    7. **Golden snapshot:** the intermediate persona with a fixed salt, `now`, seed and `TZ=UTC` gives `expect(result.json).toMatchSnapshot()`. Every exported `x` and `z` has at most 4 decimals (pre-flight P22). A second snapshot comes from a richer scan: public and custom MCP labels, a C5 date and a revealed name (ruling, Task 14).
+    9. **Checks** (ruling, Task 14): each exported check is exactly `{ id, status, reason, n, tools, values }`; the reading side rebuilds every question exactly from id, reason and values; a reason outside `REASONS`, an unknown check id, a value outside its kind, or a date outside C5 fails the export, naming paths only.
+    10. **Fail closed** (ruling, Task 14): a draft the schema would change throws `ExportError` with the paths only; a missing required field, a negative or fractional count, a non-finite time and a share outside 0..1 each throw; any unexpected exception surfaces as an `ExportError` naming its stage; the three personas, an empty scan and a lifetime-only scan export without throwing.
     8. **Persona canaries** (P3 pre-flight F25): `exportPayload(analyze(personaScan("expert", { canaries: true })), { schema: "aiprof/2" }).json` passes `expectNoCanaries` with no `allow`.
 - [ ] **Step 2: Run** `bun test test/core/privacy` → FAIL.
 - [ ] **Step 3: Implement** the schema, the allowlists, canonical JSON and the export.
@@ -2156,6 +2245,7 @@ This task runs in two parts (ruling, Task 15). **15a** is the pacer, `ScanOption
 - Modify: `core/io/jsonl.ts`, `core/scan.ts`, `test/core/io/jsonl.test.ts` (its positional `GcPacer` test moves to `gcpacer.test.ts`, pre-flight P4)
 - Modify: the five reader suites that assert a scan's exact log list (`test/core/sources/{claude-code.transcripts,claude-code.lifetime,antigravity,codex.index,copilot}.test.ts`), only so that each list ignores the `scan.gc` code (ruling, Task 15a)
 - Create: `test/kit/synth.ts`, `test/kit/synth.test.ts` (ruling, Task 15a), `test/core/io/gcpacer.test.ts`, `test/core/scale.test.ts`
+- Modify (15b): `core/model/store.ts` and `test/core/model/store.test.ts`, for the compact session index (ruling, Task 15b)
 
 **Interfaces:**
 - `GcPacer` becomes adaptive.
@@ -2172,6 +2262,8 @@ This task runs in two parts (ruling, Task 15). **15a** is the pacer, `ScanOption
   - It builds a deterministic mix directly in memory, with no files, of exactly `events` events.
   - The mix uses sessions with subagents, human prompts, tools, usage, anchors, markers and turns, in Claude Code-like proportions, plus `RepoSignals`.
   - Sessions keep a fixed spacing, so the concurrent-session mix is the same at every size; coverage events carry the source's real record count and at least 1 file; `startedAt` precedes `finishedAt` (ruling, Task 15a).
+- **The pacer rule is under revision** (ruling, memory budget). The 1 GiB peak-RSS budget stands: it is the plan's acceptance bar. The adaptive pacer's collection rule above is being revised against it.
+- **Compact session index** (ruling, Task 15b). The 25% bound and its meaning stay as written: the store's per-session index is not counted as "store", and it is not released after `analyze`, since the next consumer would rebuild it. Instead the index `forSession` builds is compact, because it lives as long as the store: one number per distinct session id, and per kind a table of the kind list's positions grouped by session. `forSession` keeps its exact behaviour: the same event objects (identity matters to `isHuman`), in the same order, built lazily on first use and dropped by `add`.
 
 - [ ] **Step 1: Write the failing tests.**
   - `gcpacer.test.ts`, with a fake `rss` and `collect`:
@@ -2184,9 +2276,11 @@ This task runs in two parts (ruling, Task 15). **15a** is the pacer, `ScanOption
   - `scale.test.ts`:
     - **Default (300,000 events):**
       - after `Bun.gc(true)`, `analyze` retains at most 25% of the store's heap, measured as the delta in `heapUsed` before and after with the result held;
-      - it runs in ≤ 5 s;
+      - it runs in ≤ 5 s locally, and ≤ 30 s when `CI` is exactly `"true"`, since a shared runner is several times slower (ruling, Task 15b);
       - the export is ≤ 300 KB.
+    - **Sanity bounds** (ruling, Task 15b): the retained delta is above 0, and the store costs between 50 and 500 bytes per event, so a skipped collection or a shrunken store cannot pass silently. The kinds whose strings are flattened are read from the store, not hard-coded.
     - **`SLOW=1` (3,000,000 events):** the same 25% bound, and ≤ 30 s. This test runs locally only and writes no files.
+  - `store.test.ts` (ruling, Task 15b): the compact index gives `forSession` results equal to a plain filter, the same objects in the same order, including a session first seen in a later kind and an `add` after the index is built.
 - [ ] **Step 2: Run** `bun test test/core/io/gcpacer.test.ts test/core/scale.test.ts` → FAIL.
 - [ ] **Step 3: Implement** the adaptive pacer, the option and the synthetic store. Fix any per-event copy in the analysis that the budget exposes.
 - [ ] **Step 4: Run** `bun test && SLOW=1 bun test test/core/scale.test.ts && bunx tsc --noEmit` → PASS.
@@ -2195,6 +2289,8 @@ This task runs in two parts (ruling, Task 15). **15a** is the pacer, `ScanOption
 ---
 
 ### Task 16: Integration, smoke, local acceptance, PR
+
+This task runs in two parts (ruling, Task 16). **Part 1** is Steps 1–4: the integration test, the smoke's new lines and their tests, and the `core/index.ts` value exports. **Part 2** is Steps 5–6: the local acceptance run and the PR. Part 2 runs after everything is merged, because the real-machine run must exercise the final forensics and the fail-closed export.
 
 **Files:**
 - Create: `test/core/analysis.integration.test.ts`
@@ -2207,15 +2303,18 @@ This task runs in two parts (ruling, Task 15). **15a** is the pacer, `ScanOption
   - `dimensions scored=<k>/7`
   - `not-saturated=<PASS|FAIL>`
   - `metrics-have-window-and-n=<PASS|FAIL>`
-  - `export-no-raw-paths=<PASS|FAIL>`: the JSON contains no home path, no cwd from `r.cwds`, and no root from `r.repos.roots`
+  - `export-no-raw-paths=<PASS|FAIL>`: the JSON contains no home path, no cwd from `r.cwds`, and no root from `r.repos.roots`, compared also in lower-cased and forward-slash forms (ruling, Task 16)
+  - `export-violations=<n>`, only when the export throws: the number of violating paths, never the paths themselves (ruling, Task 16)
   - `export-under-300kb=<PASS|FAIL>` (pre-flight P19)
   - `forensics-ran=<PASS|FAIL>`
   - `repo-signals=<status> repos=<n>`
 - Exit 1 when any of these hold:
   - any analysis check fails;
+  - there are not exactly 7 dimension entries: the `/7` is fixed (ruling, Task 16);
   - scan plus analyze takes more than 60 s;
   - peak RSS exceeds 1 GiB.
-- `not-saturated` passes when every scored dimension with a display score of 99 carries `openTail` (scores are clamped to [1, 99], so none can read 100). Every displayed 99 sets `openTail` (pre-flight P16), so this line guards that invariant.
+- `not-saturated` passes when every scored dimension with a display score of 99 carries `openTail` (scores are clamped to [1, 99], so none can read 100). Every displayed 99 sets `openTail` (pre-flight P16), so this line guards that invariant. It also fails on any score above 99: the acceptance lines must not pass on a broken engine (ruling, Task 16).
+- **One metric-metadata walker** (ruling, Task 16), `metricMetaProblems(a: Analysis): { metrics: number; bad: string[] }` in `scripts/smoke-local.ts`, shared by the smoke and the integration test. Every `meta` object, every object carrying a `window` key, and every metric is metric metadata, except the analysis's own `meta` and the coverage and exposure per-tool rows. Each needs a valid window, a finite `n` and an array `sources`; a present-but-undefined `value` counts as bad. The places the types require a `meta` are checked by name, so missing metadata is found too.
 
 - [ ] **Step 1: Write the failing integration test.**
   - **Setup:**
@@ -2226,7 +2325,8 @@ This task runs in two parts (ruling, Task 15). **15a** is the pacer, `ScanOption
     - every P0 plugin reports coverage;
     - `r.repos.status === "ok"`;
     - the analysis has 7 dimension entries, each with an allowed status;
-    - the metric walker passes;
+    - the metric walker passes; in `smoke.test.ts`, removing a dimension's, a component's or a signal's metadata makes it fail (ruling, Task 16);
+    - with repo signals on, guardrails, instructions and Delivery are measured from the fixture repos (ruling, Task 16);
     - every number is finite.
   - **Export expectations:**
     - the export passes `expectNoCanaries` with no `allow`;
