@@ -2,19 +2,8 @@
 import { describe, expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
 import { fromUtf8, utf8 } from "../../src/trust/bytes";
-import { TrustError, type TrustCode } from "../../src/trust/errors";
 import { jcs, jcsBytes, parseCanonical } from "../../src/trust/jcs";
-
-/** The code of the TrustError that f throws, or "no throw". Any other throw fails the test. */
-function codeOf(f: () => unknown): TrustCode | "no throw" {
-  try {
-    f();
-  } catch (e) {
-    if (e instanceof TrustError) return e.code;
-    throw e;
-  }
-  return "no throw";
-}
+import { codeOf } from "../kit/keys";
 
 /** The double whose IEEE-754 bit pattern is these 16 hex digits. */
 function fromBits(bits: string): number {
@@ -141,8 +130,8 @@ describe("parseCanonical (F2 reading)", () => {
   const NOT_CANONICAL: ReadonlyArray<readonly [string, Uint8Array]> = [
     ["a BOM", concat(Uint8Array.of(0xef, 0xbb, 0xbf), canonical)],
     ["the canonical bytes plus \\n", concat(canonical, utf8("\n"))],
-    ["re-indented JSON", utf8(JSON.stringify(value, null, 2))],
-    ["CRLF line ends", utf8(JSON.stringify(value, null, 2).replaceAll("\n", "\r\n"))],
+    ["re-indented JSON", utf8(JSON.stringify(JSON.parse(fromUtf8(canonical)), null, 2))],
+    ["CRLF line ends", utf8(JSON.stringify(JSON.parse(fromUtf8(canonical)), null, 2).replaceAll("\n", "\r\n"))],
     ["unsorted keys", utf8('{"b":1,"a":2}')],
     ['{"a":1,"a":1}', utf8('{"a":1,"a":1}')],
     ["1.0", utf8("1.0")],

@@ -3,7 +3,6 @@ import { describe, expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
 import { createCipheriv, hkdfSync } from "node:crypto";
 import { b64u, equalBytes, utf8 } from "../../src/trust/bytes";
-import { TrustError, type TrustCode } from "../../src/trust/errors";
 import {
   defaultRand,
   displayFingerprint,
@@ -20,40 +19,10 @@ import {
   xFromPriv,
   type Rand,
 } from "../../src/trust/keys";
-
-/** The code of the TrustError that f throws, or "no throw". Any other throw fails the test. */
-function codeOf(f: () => unknown): TrustCode | "no throw" {
-  try {
-    f();
-  } catch (e) {
-    if (e instanceof TrustError) return e.code;
-    throw e;
-  }
-  return "no throw";
-}
+import { codeOf, VEC } from "../kit/keys";
 
 const hex = (s: string): Uint8Array => new Uint8Array(Buffer.from(s, "hex"));
 const toHex = (b: Uint8Array | ArrayBuffer): string => Buffer.from(b instanceof ArrayBuffer ? new Uint8Array(b) : b).toString("hex");
-
-/** The published vector keys (RFC 8032 §7.1 TEST 1 and 2, RFC 7748 §6.1). They are never trust anchors. */
-const VEC = {
-  t1: {
-    seed: hex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"),
-    pub: hex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"),
-  },
-  t2: {
-    seed: hex("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb"),
-    pub: hex("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"),
-  },
-  alice: {
-    priv: hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"),
-    pub: hex("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"),
-  },
-  bob: {
-    priv: hex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb"),
-    pub: hex("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"),
-  },
-};
 
 describe("Ed25519 (F3)", () => {
   test("edFromSeed derives the vector public keys", () => {

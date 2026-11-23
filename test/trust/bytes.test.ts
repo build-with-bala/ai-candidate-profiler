@@ -2,18 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
 import { b64u, equalBytes, fromUtf8, unb64u, utf8 } from "../../src/trust/bytes";
-import { TrustError, type TrustCode } from "../../src/trust/errors";
-
-/** The code of the TrustError that f throws, or "no throw". Any other throw fails the test. */
-function codeOf(f: () => unknown): TrustCode | "no throw" {
-  try {
-    f();
-  } catch (e) {
-    if (e instanceof TrustError) return e.code;
-    throw e;
-  }
-  return "no throw";
-}
+import { codeOf, VEC } from "../kit/keys";
 
 const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 /** The V7 signature: 64 bytes, so its last character carries 4 unused bits. */
@@ -42,14 +31,19 @@ describe("b64u and unb64u (F1)", () => {
   });
 
   test("unb64u rejects a last character that differs only in its unused bits (pre-flight G19)", () => {
-    const original = unb64u(V7_SIG, { bytes: 64 });
-    const last = ALPHABET.indexOf(V7_SIG.slice(-1));
-    expect(last & 0b1111).toBe(0);
-    for (let unused = 1; unused < 16; unused++) {
-      const variant = V7_SIG.slice(0, -1) + ALPHABET[last | unused];
-      const lenient: Uint8Array = new Uint8Array(Buffer.from(variant, "base64url"));
-      expect(lenient).toEqual(original); // a lenient decoder reads the same bytes
-      expect(codeOf(() => unb64u(variant))).toBe("bad-base64");
+    // A 64-byte signature leaves 4 unused bits in its last character, a 32-byte key 2.
+    const cases: ReadonlyArray<readonly [string, number, number]> = [[V7_SIG, 64, 4], [b64u(VEC.t1.pub), 32, 2]];
+    for (const [s, bytes, bits] of cases) {
+      const original = unb64u(s, { bytes });
+      const mask = (1 << bits) - 1;
+      const last = ALPHABET.indexOf(s.slice(-1));
+      expect(last & mask).toBe(0);
+      for (let unused = 1; unused <= mask; unused++) {
+        const variant = s.slice(0, -1) + ALPHABET[last | unused];
+        const lenient: Uint8Array = new Uint8Array(Buffer.from(variant, "base64url"));
+        expect(lenient).toEqual(original); // a lenient decoder reads the same bytes
+        expect(codeOf(() => unb64u(variant))).toBe("bad-base64");
+      }
     }
   });
 
