@@ -6,9 +6,10 @@ import type { ExportedPayload } from "../../src/payload/exported";
 import { assemble, bundleBytes, signBundle, type SignedBundle, type UnsignedBundle } from "../../src/trust/bundle";
 import { mintInvite, type Invite } from "../../src/trust/invite";
 import { jcs } from "../../src/trust/jcs";
-import type { Rand } from "../../src/trust/keys";
+import type { Rand, XKey } from "../../src/trust/keys";
+import { sealBundle, sealedBytes, type SealedBundle } from "../../src/trust/seal";
 import type { Signer } from "../../src/trust/signer";
-import { testCompany, testSigner } from "./keys";
+import { testCompany, testSigner, VEC } from "./keys";
 
 export type Persona = "novice" | "intermediate" | "expert";
 
@@ -182,4 +183,19 @@ export function personaBundle(kind: Persona, o: { invite?: Invite | null; name?:
   });
   const bundle = signBundle(unsigned, signer);
   return { bundle, bytes: bundleBytes(bundle) };
+}
+
+/**
+ * A persona bundle bound to an invite and sealed to its sealTo: by default the V6 invite (sealed to VEC.bob, the
+ * testCompany X25519 key) and VEC.alice as the ephemeral key, so the bytes are the same on every run.
+ */
+export function sealedPersonaBundle(
+  kind: Persona,
+  o: { invite?: Invite; name?: string; signer?: Signer; ephemeral?: XKey } = {},
+): { bundle: SignedBundle; sealed: SealedBundle; bytes: Uint8Array } {
+  const invite = o.invite ?? v6Invite();
+  if (invite.sealTo === null) throw new Error("the invite has no sealTo");
+  const { bundle } = personaBundle(kind, { invite, name: o.name, signer: o.signer });
+  const sealed = sealBundle(bundle, invite.sealTo, { ephemeral: o.ephemeral ?? VEC.alice });
+  return { bundle, sealed, bytes: sealedBytes(sealed) };
 }
