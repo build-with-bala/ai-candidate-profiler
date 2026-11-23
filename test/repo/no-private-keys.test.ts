@@ -26,8 +26,9 @@ const RULES: ReadonlyArray<readonly [Finding, RegExp]> = [
   ["pkcs8-hex", /302e020100300506032b65(?:70|6e)04220420[0-9a-fA-F]{64}/],
   // The same DER as base64, as in a PEM body.
   ["pkcs8-base64", /MC4CAQAwBQYDK2V[wu]BCIEI[A-Za-z0-9+/]{40,}/],
-  // A JWK private member "d" with a 32-byte value, also inside an escaped JSON string.
-  ["jwk-d", new RegExp(String.raw`\\?"d\\?"\s*:\s*\\?"${B64U_43}`)],
+  // A JWK private member d with a 32-byte value: in JSON, inside an escaped JSON string, or in a JS/TS object
+  // literal with the name unquoted or in either quote.
+  ["jwk-d", new RegExp(String.raw`(?:\b|\\?["'])d\\?["']?\s*:\s*\\?["'\x60]${B64U_43}`)],
   // A company.json "seed" or "priv", in JSON or in a JS/TS object literal.
   ["keystore", new RegExp(String.raw`\b(?:seed|priv)\\?["']?\s*:\s*\\?["'\x60]${B64U_43}`)],
   // The compile-time signing key, "<keyId>:<b64u seed>", next to its define name.
@@ -83,8 +84,13 @@ describe("the scanner, on keys built at run time", () => {
     }
   });
 
-  test("finds a private JWK, raw or escaped inside a string", () => {
+  test("finds a private JWK, raw or escaped inside a string, or as an object literal", () => {
     for (const key of [ed, x]) {
+      const { d, x: pub, crv } = key.export({ format: "jwk" });
+      expect(findings(`{ kty: "OKP", crv: "${crv}", d: "${d}", x: "${pub}" }`)).toEqual(["jwk-d"]);
+      expect(findings(`{'d':'${d}'}`)).toEqual(["jwk-d"]);
+      expect(findings(`{ "d": \`${d}\` }`)).toEqual(["jwk-d"]);
+      expect(findings(`const jwk = {\n  d: '${d}',\n};`)).toEqual(["jwk-d"]);
       const jwk = JSON.stringify(key.export({ format: "jwk" }));
       expect(findings(jwk)).toEqual(["jwk-d"]);
       expect(findings(JSON.stringify(jwk))).toEqual(["jwk-d"]);
@@ -114,6 +120,8 @@ describe("the scanner, on keys built at run time", () => {
     const ok = [
       'no JSON object holding both "kty":"OKP" and "d"',
       '{"kty":"OKP","crv":"Ed25519","d":"<seed>","x":"<pub>"}',
+      `{ kty: "OKP", x: "${b64u(newEdKey().pub)}" }`, // a public JWK literal
+      `{ id: "${b64u(newEdKey().pub)}", kid: "${b64u(newEdKey().pub)}" }`, // names that merely end in d
       pubJwk,
       "no `-----BEGIN … PRIVATE KEY-----` block",
       'const ED_PKCS8 = Buffer.from("302e020100300506032b657004220420", "hex");',
