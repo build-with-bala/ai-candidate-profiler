@@ -10,8 +10,12 @@ export interface InviteLogEntry { id: string; name: string | null; role: string;
 /**
  * Appends one line, creating the file at 0600 (never its folder). On POSIX a symlink at the path is refused
  * (O_NOFOLLOW). When an earlier write was torn, the new line starts on a fresh line, so only the torn one is lost.
+ * An entry that readInviteLog would skip is Error("the invite log entry is malformed"), and nothing is written.
  */
 export function appendInviteLog(h: ProfilerHome, e: InviteLogEntry): void {
+  // The same rules readInviteLog applies, so no line is written that a later read would skip.
+  const entry = toEntry(e);
+  if (entry === null) throw new Error("the invite log entry is malformed");
   const posix = h.platform !== "win32";
   const flags = posix ? constants.O_RDWR | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0) : "a+";
   const fd = openSync(h.invites, flags, 0o600);
@@ -24,7 +28,7 @@ export function appendInviteLog(h: ProfilerHome, e: InviteLogEntry): void {
       readSync(fd, last, 0, 1, size - 1);
       if (last[0] !== 0x0a) lead = "\n";
     }
-    const { id, name, role, roleHash, iat, exp, sealed, fields } = e;
+    const { id, name, role, roleHash, iat, exp, sealed, fields } = entry;
     const bytes = new TextEncoder().encode(lead + JSON.stringify({ id, name, role, roleHash, iat, exp, sealed, fields }) + "\n");
     let off = 0;
     while (off < bytes.length) off += writeSync(fd, bytes, off, bytes.length - off);

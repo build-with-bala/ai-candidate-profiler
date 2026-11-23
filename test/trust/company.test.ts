@@ -1,5 +1,6 @@
 // The company keystore (company.json) and the private home folder it lives in.
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { tmpdir } from "node:os";
@@ -152,6 +153,72 @@ describe("writePrivate", () => {
     expect(readFileSync(file, "utf8")).toBe("first");
   });
 
+  test("a taken temp name is retried with a fresh one, and the taken file is left alone", () => {
+    const file = join(root, "f");
+    const names = [join(root, ".f.taken.tmp"), join(root, ".f.taken.tmp"), join(root, ".f.free.tmp")];
+    writeFileSync(names[0]!, "stale");
+    const asked: number[] = [];
+    writePrivate(file, "new", { platform: PLATFORM, tempName: (attempt) => (asked.push(attempt), names[attempt]!) });
+    expect(asked).toEqual([0, 1, 2]);
+    expect(readFileSync(file, "utf8")).toBe("new");
+    expect(readFileSync(names[0]!, "utf8")).toBe("stale");
+    expect(readdirSync(root).sort()).toEqual([".f.taken.tmp", "f"]);
+  });
+
+  test("gives up with EEXIST when every temp name is taken, and never touches the target", () => {
+    const file = join(root, "f");
+    writeFileSync(file, "keep");
+    writeFileSync(join(root, ".f.taken.tmp"), "stale");
+    expect(() => writePrivate(file, "lost", { platform: PLATFORM, tempName: () => join(root, ".f.taken.tmp") }))
+      .toThrow(expect.objectContaining({ code: "EEXIST" }));
+    expect(readFileSync(file, "utf8")).toBe("keep");
+  });
+
+  test("the default temp name is unpredictable: a file at the old <pid>.<count> name never collides", () => {
+    const file = join(root, "f");
+    for (let n = 1; n <= 500; n++) writeFileSync(join(root, `.f.${process.pid}.${n}.tmp`), "stale");
+    for (let n = 0; n < 4; n++) writePrivate(file, String(n), { platform: PLATFORM });
+    expect(readFileSync(file, "utf8")).toBe("3");
+    expect(readdirSync(root).filter((f) => !f.startsWith(`.f.${process.pid}.`))).toEqual(["f"]);
+  });
+
+  test("a failed close after a good write is thrown, the temp file is removed and the target is untouched", () => {
+    const file = join(root, "f");
+    writeFileSync(file, "keep");
+    const realClose = fs.closeSync;
+    const close = spyOn(fs, "closeSync").mockImplementation((fd) => {
+      realClose(fd);
+      throw Object.assign(new Error("close failed"), { code: "EIO" });
+    });
+    try {
+      expect(() => writePrivate(file, "lost", { platform: PLATFORM })).toThrow("close failed");
+      expect(() => writePrivate(join(root, "g"), "lost", { platform: PLATFORM, exclusive: true })).toThrow("close failed");
+    } finally {
+      close.mockRestore();
+    }
+    expect(readFileSync(file, "utf8")).toBe("keep");
+    expect(readdirSync(root)).toEqual(["f"]);
+  });
+
+  test("when both the write and the close fail, the write's error is the one thrown and the temp file is removed", () => {
+    const file = join(root, "f");
+    const realClose = fs.closeSync;
+    const write = spyOn(fs, "writeSync").mockImplementation(() => {
+      throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+    });
+    const close = spyOn(fs, "closeSync").mockImplementation((fd) => {
+      realClose(fd);
+      throw Object.assign(new Error("close failed"), { code: "EIO" });
+    });
+    try {
+      expect(() => writePrivate(file, "lost", { platform: PLATFORM })).toThrow("disk full");
+    } finally {
+      write.mockRestore();
+      close.mockRestore();
+    }
+    expect(readdirSync(root)).toEqual([]);
+  });
+
   test("never creates folders", () => {
     expect(() => writePrivate(join(root, "missing", "f"), "x", { platform: PLATFORM })).toThrow();
     expect(() => writePrivate(join(root, "missing", "f"), "x", { platform: PLATFORM, exclusive: true })).toThrow();
@@ -191,6 +258,27 @@ describe("initCompany", () => {
     expect((JSON.parse(after) as CompanyFile).name).toBe("Other Co");
     expect(loadCompany(home, testSys(root))?.company).toEqual(replaced);
     expect(readdirSync(home.dir)).toEqual(["company.json"]);
+  });
+
+  test("force removes stale company.json temp files, which hold key copies, and still replaces the keys", () => {
+    initCompany(home, { name: "Example Co", now: NOW });
+    for (const s of [".company.json.123.1.tmp", ".company.json.99.4.tmp", `.company.json.${process.pid}.1.tmp`]) {
+      writeFileSync(join(home.dir, s), "an old key copy");
+    }
+    writeFileSync(join(home.dir, "notes.txt"), "mine");
+    writeFileSync(join(home.dir, ".company.json.bak"), "mine too");
+    const c = initCompany(home, { name: "Other Co", now: NOW, force: true });
+    expect(loadCompany(home, testSys(root))?.company).toEqual(c);
+    expect(readdirSync(home.dir).sort()).toEqual([".company.json.bak", "company.json", "notes.txt"]);
+  });
+
+  test("without force, a stale temp file changes nothing: an existing keystore is still exists", () => {
+    initCompany(home, { name: "Example Co", now: NOW });
+    const before = readFileSync(home.company, "utf8");
+    writeFileSync(join(home.dir, ".company.json.123.1.tmp"), "an old key copy");
+    expect(() => initCompany(home, { name: "Other Co", now: NOW })).toThrow(/^exists$/);
+    expect(readFileSync(home.company, "utf8")).toBe(before);
+    expect(existsSync(join(home.dir, ".company.json.123.1.tmp"))).toBe(true);
   });
 
   test.skipIf(!POSIX)("never writes through a dangling symlink at company.json", () => {

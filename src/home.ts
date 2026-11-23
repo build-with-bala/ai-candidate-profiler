@@ -2,6 +2,7 @@
 // On POSIX the folders this app creates are 0700 and every file it writes 0600; Windows has no such modes. The platform
 // always comes from Sys, never from process.platform, so tests can run either branch.
 import { chmodSync, closeSync, fchmodSync, fsyncSync, mkdirSync, openSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { basename, dirname, join, posix, resolve, win32 } from "node:path";
 
 export interface Sys { home: string; vars: Readonly<Record<string, string | undefined>>; platform: "darwin" | "linux" | "win32" }
@@ -34,45 +35,75 @@ export function ensurePrivateDir(dir: string, platform: Sys["platform"]): string
   return [];
 }
 
-let tempCount = 0;
+/** How many temp names writePrivate tries before it gives up with EEXIST. */
+const TEMP_ATTEMPTS = 8;
+
+/** `.<name>.<pid>.<ms>.<12 random hex>.tmp` in the target's folder: a stale temp file from a crashed run never collides. */
+function defaultTempName(path: string): string {
+  return join(dirname(path), `.${basename(path)}.${process.pid}.${Date.now()}.${randomBytes(6).toString("hex")}.tmp`);
+}
 
 /**
  * Writes the whole file at 0600 and never creates folders.
  * - By default the bytes go to a temp file in the same folder, which is renamed over `path`. A failed write never
- *   touches the old file, and a symlink at `path` is replaced, never written through.
+ *   touches the old file, and a symlink at `path` is replaced, never written through. A temp name that is taken is
+ *   retried with a fresh one. `tempName` replaces the name generator (tests only).
  * - `exclusive` creates `path` itself and fails with EEXIST when anything, even a dangling symlink, is there. A failed
  *   write removes the partial file.
  */
-export function writePrivate(path: string, data: string | Uint8Array, o: { platform: Sys["platform"]; exclusive?: boolean }): void {
+export function writePrivate(
+  path: string,
+  data: string | Uint8Array,
+  o: { platform: Sys["platform"]; exclusive?: boolean; tempName?: (attempt: number) => string },
+): void {
   const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
   if (o.exclusive) {
     writeNew(path, bytes, o.platform);
     return;
   }
-  const temp = join(dirname(path), `.${basename(path)}.${process.pid}.${++tempCount}.tmp`);
-  writeNew(temp, bytes, o.platform);
-  try {
-    renameSync(temp, path);
-  } catch (e) {
-    unlinkQuietly(temp);
-    throw e;
+  const name = o.tempName ?? (() => defaultTempName(path));
+  for (let attempt = 0; ; attempt++) {
+    const temp = name(attempt);
+    try {
+      writeNew(temp, bytes, o.platform);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "EEXIST" && attempt + 1 < TEMP_ATTEMPTS) continue;
+      throw e;
+    }
+    try {
+      renameSync(temp, path);
+    } catch (e) {
+      unlinkQuietly(temp);
+      throw e;
+    }
+    return;
   }
 }
 
-/** Creates `path` ("wx", 0600), writes every byte and syncs it; on any failure the new file is removed. */
+/**
+ * Creates `path` ("wx", 0600), writes every byte, syncs and closes it. On any failure, a failed close included, the
+ * new file is removed, and the first error is the one thrown.
+ */
 function writeNew(path: string, bytes: Uint8Array, platform: Sys["platform"]): void {
   const fd = openSync(path, "wx", 0o600);
+  let written = false;
   try {
     if (platform !== "win32") fchmodSync(fd, 0o600); // exactly 0600, whatever the umask
     let off = 0;
     while (off < bytes.length) off += writeSync(fd, bytes, off, bytes.length - off);
     fsyncSync(fd);
-  } catch (e) {
-    closeSync(fd);
-    unlinkQuietly(path);
-    throw e;
+    written = true;
+  } finally {
+    let closeError: unknown = null;
+    try {
+      closeSync(fd);
+    } catch (e) {
+      closeError = e;
+    }
+    if (!written || closeError !== null) unlinkQuietly(path);
+    // A write error is already propagating; only a close error after a good write needs throwing here.
+    if (written && closeError !== null) throw closeError;
   }
-  closeSync(fd);
 }
 
 function unlinkQuietly(path: string): void {

@@ -82,7 +82,7 @@ function decode(s: string, what: string, bytes?: number): Uint8Array {
   try {
     return unb64u(s, { bytes });
   } catch {
-    throw bad(`${what} is not ${bytes === undefined ? "" : `a ${bytes}-byte `}base64url value`);
+    throw bad(`${what} is not ${bytes === undefined ? "a" : `a ${bytes}-byte`} base64url value`);
   }
 }
 
@@ -149,6 +149,8 @@ function checkClaims(v: unknown): { claims: InviteClaims; companyPub: Uint8Array
 
 /** F4 validity at `nowMs`: expired after exp, not yet valid before iat − 300 s, valid in between (both ends included). */
 export function inviteStatus(i: Invite, nowMs: number): "valid" | "expired" | "not-yet-valid" {
+  // NaN compares false both ways, so without this check it would pass as valid.
+  if (typeof nowMs !== "number" || !Number.isFinite(nowMs)) throw new Error("the current time must be a finite epoch-ms number");
   if (nowMs > i.claims.exp * 1000) return "expired";
   if (nowMs < (i.claims.iat - CLOCK_SKEW_S) * 1000) return "not-yet-valid";
   return "valid";

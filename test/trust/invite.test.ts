@@ -1,7 +1,7 @@
 // F4: invite tokens (format, expiry, requested fields) and the recruiter's local invite log.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
-import { appendFileSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensurePrivateDir, profilerHome, type ProfilerHome } from "../../src/home";
@@ -53,6 +53,16 @@ function mintV6(): Invite {
 function signed(text: string): string {
   const seg = b64u(utf8(text));
   return `${INVITE_PREFIX}.${seg}.${b64u(edSign(VEC.t1.seed, utf8(`${INVITE_PREFIX}.${seg}`)))}`;
+}
+
+/** The message of what f throws, or "no throw". */
+function messageOf(f: () => unknown): string {
+  try {
+    f();
+  } catch (e) {
+    return (e as Error).message;
+  }
+  return "no throw";
 }
 
 const v6Claims = (): Record<string, unknown> => JSON.parse(V6_CLAIMS_JCS) as Record<string, unknown>;
@@ -172,6 +182,31 @@ describe("tamper (F4 parsing)", () => {
     expect(Object.prototype).not.toHaveProperty("company");
   });
 
+  test("the length cap is exactly 4096 characters, and a long claims part is what trips it", () => {
+    // Validly signed claims padded with an extra key. A token is 99 characters plus its claims part, and a base64url
+    // part is never 4n+1 long, so 4096 is out of reach: 2997 bytes of claims give 4095, and 2998 give 4097.
+    const padded = (bytes: number): string => {
+      const c = v6Claims();
+      c.pad = "";
+      c.pad = "q".repeat(bytes - jcs(c).length);
+      return signed(jcs(c));
+    };
+    const under = padded(2997);
+    expect(under).toHaveLength(4095);
+    expect(messageOf(() => parseInvite(under))).toBe("not a valid invite: the claims must have exactly the keys " +
+      "company, exp, fields, iat, id, nonce, role, roleHash, sealTo, v");
+    const over = padded(2998);
+    expect(over).toHaveLength(4097);
+    expect(over.split(".")[1]).toHaveLength(3998);
+    expect(messageOf(() => parseInvite(over))).toBe("not a valid invite: longer than 4096 characters");
+  });
+
+  test("a part that is not base64url says so in plain words", () => {
+    const [, seg, sig] = mintV6().token.split(".");
+    expect(messageOf(() => parseInvite(`${INVITE_PREFIX}.${seg}!.${sig}`))).toBe("not a valid invite: the claims part is not a base64url value");
+    expect(messageOf(() => parseInvite(`${INVITE_PREFIX}.${seg}.${sig}AA`))).toBe("not a valid invite: the signature is not a 64-byte base64url value");
+  });
+
   test("errors never repeat the token", () => {
     const token = mintV6().token;
     const [, seg] = token.split(".");
@@ -199,6 +234,12 @@ describe("inviteStatus (Review Focus 1)", () => {
     expect(inviteStatus(i, (iat - 300) * 1000)).toBe("valid");
     expect(inviteStatus(i, (iat - 301) * 1000)).toBe("not-yet-valid");
     expect(inviteStatus(i, iat * 1000)).toBe("valid");
+  });
+
+  test("a time that is not a finite number is an error, never valid", () => {
+    for (const now of [NaN, Infinity, -Infinity, "1794909600000" as unknown as number, undefined as unknown as number]) {
+      expect(() => inviteStatus(i, now)).toThrow("the current time must be a finite epoch-ms number");
+    }
   });
 });
 
@@ -265,6 +306,26 @@ describe("invite log", () => {
     appendInviteLog(home, b); // starts on a fresh line, so the torn line costs only itself
     expect(readInviteLog(home)).toEqual(new Map([[a.id, a], [b.id, b]]));
     expect(Object.prototype).not.toHaveProperty("sealed");
+  });
+
+  test("an entry that readInviteLog would skip is refused before anything is written", () => {
+    const a = entry("a1b2c3d4e5f60718293a4b5c", "Ada");
+    const bad: Array<Record<string, unknown>> = [
+      { ...a, id: "A1B2C3D4E5F60718293A4B5C" },
+      { ...a, name: 7 },
+      { ...a, sealed: "yes" },
+      { ...a, iat: 1.5 },
+      { ...a, exp: NaN },
+      { ...a, fields: ["secrets"] },
+      { ...a, fields: "exhibits" },
+      { ...a, role: undefined },
+    ];
+    for (const e of bad) {
+      expect(() => appendInviteLog(home, e as unknown as InviteLogEntry)).toThrow("the invite log entry is malformed");
+    }
+    expect(existsSync(home.invites)).toBe(false);
+    appendInviteLog(home, a);
+    expect(readInviteLog(home)).toEqual(new Map([[a.id, a]]));
   });
 
   test.skipIf(!POSIX)("the file is 0600", () => {

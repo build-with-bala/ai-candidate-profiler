@@ -1,6 +1,7 @@
 // The company keystore, company.json: an Ed25519 key that signs invites and an X25519 key that bundles are sealed to.
 // Keys are strict b64u (F1) and each kid is fingerprint(pub) (F3). The file is 0600 in a 0700 folder on POSIX.
-import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { ensurePrivateDir, writePrivate, type ProfilerHome, type Sys } from "../home";
 import { b64u, equalBytes, unb64u } from "./bytes";
 import { defaultRand, edFromSeed, fingerprint, newEdKey, newXKey, xFromPriv, type EdKey, type Rand, type XKey } from "./keys";
@@ -22,7 +23,8 @@ export function isCompanyName(name: unknown): name is string {
 /**
  * Writes a new keystore. Without `force`, an existing company.json (or a symlink there, even a dangling one) is
  * Error("exists") and is never touched. With `force`, the new file replaces the old one atomically, so a failed
- * write keeps the old keys. `warn` receives the folder's loose-permission warning, if any.
+ * write keeps the old keys, and stale `.company.json.*.tmp` files from a crashed write are removed first.
+ * `warn` receives the folder's loose-permission warning, if any.
  */
 export function initCompany(h: ProfilerHome, o: { name: string; now: number; force?: boolean; rand?: Rand; warn?: (w: string) => void }): Company {
   if (!isCompanyName(o.name)) throw new Error(`the company name must be 1–${MAX_NAME} characters, with no control characters`);
@@ -39,13 +41,24 @@ export function initCompany(h: ProfilerHome, o: { name: string; now: number; for
     x25519: { kid: company.x.kid, pub: b64u(x.pub), priv: b64u(x.priv) },
   };
   for (const w of ensurePrivateDir(h.dir, h.platform)) o.warn?.(w);
+  if (o.force) removeStaleTemps(h);
   try {
     writePrivate(h.company, JSON.stringify(file, null, 2) + "\n", { platform: h.platform, exclusive: !o.force });
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new Error("exists"); // created since the check above
+    // Without force, EEXIST means company.json was created since the check above. With force, it can only be a temp
+    // name, so it is passed on as it is.
+    if (!o.force && (e as NodeJS.ErrnoException).code === "EEXIST") throw new Error("exists");
     throw e;
   }
   return company;
+}
+
+/** Removes the `.company.json.*.tmp` files a crashed write left behind: each holds a copy of a private key. */
+function removeStaleTemps(h: ProfilerHome): void {
+  const prefix = `.${basename(h.company)}.`;
+  for (const f of readdirSync(dirname(h.company))) {
+    if (f.startsWith(prefix) && f.endsWith(".tmp")) rmSync(join(dirname(h.company), f), { force: true });
+  }
 }
 
 /** True when anything is at `path`, a dangling symlink included. */
