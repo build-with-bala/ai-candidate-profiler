@@ -57,6 +57,7 @@ These are Plan 1's constraints as amended during its execution, plus this plan's
 **SQLite**
 - Open SQLite only via `openRo()`.
 - Use `immutable=1` only inside `openRo`, for a WAL store whose `-wal` is gone.
+- Read-only covers a store's own file and `-wal`: with a `-wal` present, SQLite may create or rewrite the `-shm` index beside a store in use, as any reader does. This is documented; reading through a private copy instead is a design question for the owner (ruling, final review).
 - Never `SELECT *`. Use parameterized queries with explicit, schema-checked column lists.
 - ✚ Every paged read goes through the shared pager in `core/sources/common/sqlite.ts` (Task 0A).
 
@@ -119,7 +120,7 @@ These are Plan 1's constraints as amended during its execution, plus this plan's
   - The two windows are never summed.
 - ✚ Analysis keeps per-session sufficient statistics, never per-event copies. It must not multiply the resident event cost; Task 15 enforces this.
 
-**Performance:** a cold scan plus analyze of the real local history takes ≤ 60 s, with peak RSS ≤ 1 GiB. Task 16 enforces this. The 1 GiB budget stands as the acceptance bar; the adaptive pacer's rule (Task 15) is under revision to meet it (ruling, memory budget).
+**Performance:** a cold scan plus analyze of the real local history takes ≤ 60 s, with peak RSS ≤ 1 GiB. Task 16 enforces this. The 1 GiB budget stands as the acceptance bar (ruling, memory budget); the pacer's fallback (Task 15) was added to meet it (ruling, Task 16b).
 
 **Signals:** ✚ a trapped SIGINT or SIGTERM ends the process by that signal once every active scan has cleaned up, so no post-scan code runs. A second signal ends it at once. Task 0D enforces this.
 
@@ -263,27 +264,28 @@ Source files are never read. `--explain` lists all of it; A's consent step and B
    - The interval is the sorted replicate scores at 0-based ranks `floor(0.025·(B−1))` and `ceil(0.975·(B−1))`, widened where needed to contain the point estimate's displayed score (ruling, Task 8).
    - The interval is null when fewer than B/2 replicates score the dimension.
 
-8. **Forensic tolerances.** The rules stay the spec's; these are the measurement tolerances.
+8. **Forensic tolerances.** The rules stay the spec's; these are the measurement tolerances. After the final review, some rules departed from the spec; spec §17 lists them for the owner. One line now divides fail from warn: a check fails only on what cannot happen unless data or times were altered, or the clock was wrong; what an honest act can produce (sessions synced in from another machine, a changed account, early access, a service resetting a limit) is at most a warn. A pass needs a minimum sample; a warn, note or fail stands on any sample. No check fails on one observation. C3, C4, C6 and C8 never fail (ruling, final review).
    - **C1/C2:** need ≥ 50 recognized anchors per kind. More than 1% of a kind's marker-carrying anchors, and at least 2, with a malformed tail make C1 at least a note (`malformed-ids`), however few recognized anchors remain (ruling, Task 11).
-   - **C3:** count only days inside the stats-cache's own span. Fail at ≥ 2 missing days and ≥ 2%; fewer, from a single missing day up, is a note (ruling, Task 11).
+     - C1 fails at at least 3 off ids and more than 1% of this encoding's ids; more than 1% with fewer than 3 is a note. It was "more than 1%" alone, which failed on one id (ruling, final review).
+     - C2 needs 200 ranked ids spanning at least 24 h (else `n/a` `too-few`): the order of ids within the time tolerance says nothing (ruling, final review).
+   - **C3:** count only days inside the stats-cache's own span. A transcript day counts as present when the stats cache holds that UTC day or either neighbour: the tool keyed its days by the UTC date in older releases and by the local date in newer ones. Missing days at max(2 days, 2%) are a `warn`, fewer a note. It was a fail at ≥ 2 missing days and ≥ 2% (ruling, Task 11); it changed because sessions synced in from another machine are honest and produce the same gap (ruling, final review). A pass needs 20 compared prompts (ruling, final review).
    - **C5:**
-     - "≫" means more than 24 h.
-     - Files in a restore cluster are exempt from the ctime rule.
-     - **Bulk change** (ruling, Task 11): a migration, a backup restore or a file-manager copy keeps birth and mtime and sets ctime to the copy time, so births do not cluster. A 10-min ctime window holding at least max(5, 10% of all files) of the files with ctime − mtime > 24 h is a bulk change. Its files are exempt from the ctime rule, and the result is at least a note with that date.
+     - **A change time alone never fails** (ruling, final review). A file changed more than a day after its last write is a note (`changed-after-write`), whose question names moving, archiving, syncing, restoring and permission changes. This replaces the `ctime ≫ mtime → fail` rule and the bulk-change exemption (ruling, Task 11): moving, syncing or restoring files sets their change time honestly, so the old rule failed genuine histories.
      - At least 5 files are needed.
-     - Fail when at least max(2, 1% of files) violate, counting only violators outside every restore cluster and bulk-change window.
-   - **C6:** ignore rollouts named within 10 min of the scan. n/a without a readable thread index.
-     - Fail when the rollouts without a thread row number at least max(2, 1% of the checked rollouts); fewer, but at least 1, is a note with the same question. A genuine history can hold a stray file with no row (ruling, Task 12).
+     - Fail when at least max(2, 1% of files) hold an event later than their own last write (by more than 2 s); files still being written during the scan are exempt (ruling, final review).
+   - **C6:** ignore rollouts named within 10 min of the scan. n/a without a readable thread index. A pass needs 5 checked rollouts (ruling, final review).
+     - Rollouts without a thread row at max(2, 1% of the checked rollouts) are a `warn`, fewer a note, with a question about another machine. It was a fail at that threshold (ruling, Task 12); sessions synced in from another machine are honest and lack rows the same way (ruling, final review).
      - When thread rows carry `createdAt`, rollouts that began before the earliest row are not checked: the index cannot vouch for sessions older than itself (ruling, Task 12).
    - **C7:**
      - Allow 1 s, since file names are truncated to the second.
+     - Violations at max(2, 1% of rollouts) fail, fewer are a note; it was any violation. A pass needs 5 rollouts (ruling, final review).
      - An offset that is a non-zero whole number of quarter hours up to 26 h (104 quarter hours, the largest difference between two real zones) is read as a time-zone change, which is a note (pre-flight P17; ruling, Task 12).
    - **C8:**
-     - A contradiction is a drop of more than 2 points within one reset window.
-     - Snapshots without `resetsAt` are never paired. Drops count as contradictions only in a reset window that holds two or more of them: a single drop looks like a reset on the service's side (ruling, Task 12).
-     - Fail at ≥ 3 contradictions and > 0.5% of pairs.
+     - A drop is a fall of more than 2 points within one reset window, and counts only when the lower reading is stamped more than 10 min after the higher one: readings of parallel sessions interleave. Snapshots without `resetsAt` are never paired (ruling, Task 12). This replaces the "two or more drops in a window" rule (ruling, final review).
+     - **C8 never fails** (ruling, final review). Counted drops at max(3, 1% of the readings) are a `warn`, fewer a note, and the question names more than one account or machine, or a reset by the service. It was a fail at ≥ 3 contradictions and > 0.5% of pairs; the service resets limits during incidents, so a drop can happen honestly.
      - n/a under 20 pairs.
-   - **C9:** allow 2 days.
+   - **C9:** allow 2 days. Any use more than 2 days before a release is a `warn` that asks about early access; a fail needs max(3, 1% of the dated sessions) used more than 90 days before the release. It was a fail on any early use (ruling, final review).
+   - **C4:** no session naming the current account is a `warn`: it cannot tell a changed account from a copied history. It was a fail. A pass needs 5 sessions (ruling, final review).
 
 9. **Dedupe across tools** (the VS Code agent host, and any other case where two tools report the same work).
    - Two human or scripted prompts from different tools with an equal `textHash`, within 60 s of each other, are one prompt.
@@ -383,6 +385,7 @@ export function eachRow(map: () => void, tally: Tally): void;
   - any failure ends the pass.
 
   It adds two behaviours: it awaits `maybeYield()` before every page, and it returns `false` once `ctx.signal.aborted` is set.
+  A pass that does not advance ends, with drift `page-stalled:<table>` (ruling, final review).
 - Antigravity keeps its 32-row step pages (`page = 32`): a step row carries blobs of up to 1 MiB each, so a 2,000-row page would break the memory budget (pre-flight P2).
 - Copilot's store pager moves onto these semantics, an accepted output change: a first non-busy failure becomes drift `table-unreadable:<table>`, where today every failure is `io-error` (pre-flight P2).
 - `core/io/sqlite.ts`: `openRo(file, temp, opener?, o?: { maxCopyBytes?: number })` refuses the copy fallback (returns null) when `size(db) + size(db-wal)` exceeds `o?.maxCopyBytes ?? MAX_COPY_BYTES`.
@@ -550,6 +553,7 @@ export function readTextLines(p: string, o: { maxBytes: number; signal?: AbortSi
   - Outside `core/io/`, no file references `Bun` at all, and none uses a `process` member other than `env` and `platform`.
   - In every core file, `core/io/` included, no program runs: `child_process`, `Bun.spawn`, `spawnSync` and `$` fail. The one exemption is `core/git/run.ts`, which may use `Bun.spawn` only.
   - The threat is accidental bypass by future code, so comment obfuscation is out of scope; the runtime refusals below stay the enforcement.
+  - The rule resolves relative imports, refuses import attributes other than `json`, and scans `.jsx` files too (ruling, final review).
 - **Read-only stores** (ruling, Task 0C): `RoDb` runs one SELECT or WITH statement, or one of the read PRAGMAs the readers use, and nothing else. ATTACH, DETACH, VACUUM, writes and every other statement throw `ReadOnlyQueryError` before they run.
 - **Refusal** (ruling, Task 0C): `core/io` refuses to open any path whose real basename is on the never-opened list. This is enforced in `noteOpen`, not only tested.
 - **Smoke error handling:** handlers for `unhandledRejection` and `uncaughtException` print `error: <class name>` and exit 1.
@@ -696,6 +700,13 @@ export const BUILTIN_AGENTS: ReadonlySet<string>;     // moved from transcripts.
 - **Copilot VS Code request times:**
   - An implausible but well-formed timestamp counts once, as `bad-ts`.
   - `no-ts` counts only a missing or shapeless timestamp, together with its drift key.
+- **Reader rules, final review** (ruling, final review):
+  - A source whose files hold only unusable lines is drift; a single unusable last line with no line end keeps a source `empty`.
+  - A Claude Code session id found in two project folders is read once, from the file written last. `ToolEv.callId` is a keyed hash.
+  - Every emitted time passes the plausible-range bound, and `bornAt` never falls back to a change time.
+  - A Codex source that is `internal`, or unknown, is `system` (an unknown shape adds drift), never a human; a source object naming one known source maps like that name.
+  - Cursor's sessionless prompt list and Antigravity history prompts are lifetime prompt logs; history prompts carry a project key (`projectKeyOf`), so a project exclusion reaches them.
+  - An anchor's id text must have the shape of a server-issued id, or no anchor is emitted. A store's close finalizes every statement.
 - **Docs:**
   - `docs/design.md`, the per-tool table in §6.1 (the Claude Code, Codex, Copilot and Antigravity rows): remove every figure measured on the author's machine. Keep the requirement and its `[measured]` citation. Format constants go in code spans: field names, `kind:0/1/2`, version numbers, and dates of format changes. Rewrite any other `[measured]` line that the docs test flags the same way.
   - `core/sources/antigravity/FORMAT.md`: two sentences report what local records showed — that no model field was seen, and how `input_tokens` compares with `cache_read_tokens` on most records. Rewrite them as statements about the format, marked "(unverified)".
@@ -797,6 +808,8 @@ export const TECH_TERMS: Readonly<Record<TechCategory, readonly string[]>>;   //
 
 **Package runners** (pre-flight P6): a JS package runner (`npm`, `pnpm`, `yarn` or `bun`, optionally followed by `run`, `exec` or `x`) followed by a tool the toolchain table names runs that tool, so `pnpm vitest run` is read as `vitest run`. A package script named like such a tool is read as that tool.
 
+**Check commands, final review** (ruling, final review): trailing brackets are stripped; valued wrapper flags are skipped with their value; one shared unwrap handles `sh -c` strings; the wrappers `pdm`, `poetry`, `bundle` and `docker exec`, and further runners and stacks, are read through. `html` and `css` edits are checked by any test. A gap in the table had lowered Verification for whole stacks.
+
 **Claude Code config:**
 - When `settings.json` has `disableAllHooks: true`:
   - emit no `hook` events;
@@ -864,12 +877,14 @@ export const TECH_TERMS: Readonly<Record<TechCategory, readonly string[]>>;   //
 // core/git/types.ts
 export type AiTool = "claude" | "codex" | "copilot" | "cursor" | "gemini" | "antigravity" | "aider" | "other";
 export type InstructionKind = "claude" | "agents" | "gemini" | "cursorrules" | "cursor-rules";
-export interface CommitFact { ts: number; shaKey: string; ai?: AiTool; generated?: AiTool; rework?: "revert" | "fixup" | "fix"; files: string[];
-  owner: boolean }   // true in exactly one repo that lists the commit (ruling, Task 2)
+export interface CommitFact { id?: string /* keyed hash of the full sha, 16 hex; set on every commit repo signals read */; ts: number; shaKey: string;
+  ai?: AiTool; generated?: AiTool; rework?: "revert" | "fixup" | "fix"; files: string[];
+  mine: boolean }   // the author is the person, in every clone that lists the commit; replaces `owner` (ruling, final review)
 export interface InstructionFacts { files: InstructionKind[]; namesChecks: CheckKind[]; touched: number; lastTouched?: number }
 export interface HookFacts { entries: number; checks: CheckKind[]; disabled: boolean }
 export interface CheckFacts { present: boolean; checks: CheckKind[] }
-export interface RepoFacts { repoKey: string; projectKeys: string[]; identity: boolean; commits: CommitFact[]; commitsTruncated: boolean; fileLists: boolean;
+export interface RepoFacts { repoKey: string; projectKeys: string[]; identity: boolean; commits: CommitFact[]; commitsTruncated: boolean;
+  commitsReach?: number /* set exactly when the list was cut: the oldest commit time read (ruling, final review) */; fileLists: boolean;
   instructions: InstructionFacts; hooks: HookFacts; ci: CheckFacts; precommit: CheckFacts }        // Task 3 fills the last four; until then empty
 export interface RepoSignals { status: "ok" | "partial" | "off" | "git-missing"; repos: RepoFacts[]; roots: Map<string /* repoKey */, string /* rawRoot, memory only (P3 pre-flight F16) */>;
   skipped: Record<string, number>; since?: number; ms: number }
@@ -917,14 +932,15 @@ ScanResult.repos: RepoSignals;                          // status "off" when dis
 
 **Commits** (per root):
 1. Run `git config --get user.email`. The email is held in memory, compared case-insensitively, and never stored. If there is none, set `identity: false` and read no commits.
-2. Run `git log --all --no-merges --no-renames --date-order --since=<ISO of detailFrom − 3 days> --max-count=<maxCommits> --name-only -z --format=%x00%x1e%H%x1f%ct%x1f%ae%x1f%B`. Records are split on NUL separators, and each record's field count is validated, so a `\x1e` in a message neither drops the real commit nor forges one, and a changed path is never read as a header (ruling, Task 2).
+2. Run `git log --all --no-merges --no-renames --since-as-filter=<ISO of detailFrom − 3 days> --max-count=<maxCommits> --name-only -z --format=%x00%x1e%H%x1f%ct%x1f%ae%n%B`. The first rule named `--date-order` and plain `--since`; a single old-dated commit then stopped the walk and zeroed a repository under status `ok`. So `--date-order` is gone, `--since-as-filter` is used on git 2.37 or later (plain `--since` before, with that limit stated), and commits are returned newest first, then by `id`. The oldest supported git is 2.13; an older one is not used (`git-missing`, `git-too-old` counted once). An unborn HEAD is an empty history (ruling, final review). The output is decoded as it streams with the byte-order mark kept, so a path that starts with one is neither dropped nor read as a header (ruling, Task 16b). Records are split on NUL separators, and each record's field count is validated, so a `\x1e` in a message neither drops the real commit nor forges one, and a changed path is never read as a header (ruling, Task 2).
 3. Keep only commits whose author email equals `user.email`.
 4. Set the fields:
    - `ts` = `%ct × 1000`;
    - `shaKey` = `keyedHash(salt, sha.slice(0, 7).toLowerCase())`, the normalised 7-hex prefix, so it equals the `detail` of the Claude Code `commit` marker for the same commit, which Task 0E keys the same way (pre-flight P8);
    - `files` = each path as `keyedHash(salt, path)`, capped at `maxFiles`.
 5. Partial clones: when git is older than 2.44 (from `git --version`, pre-flight P20) and the repo is a partial clone (`extensions.partialClone` is set), read commits without `--name-only`. Set `fileLists: false`, so rework cannot be measured in that repo. The `--name-only` rule stays for speed and fidelity only; the transport switches above are the security (ruling, Task 2).
-6. **One owner per commit** (ruling, Task 2). The same commit can sit in several clones or forks. Repos are compared by the FULL sha, held in memory for the pass, never by the 7-hex key, whose collisions would drop unrelated commits. Every repo keeps its full commit list. Each commit has `owner: true` in exactly one repo: the one with the most detail-window sessions, then the smallest `repoKey`. Whole-report totals count owner commits only. Per-repo matching (delivery, rework, instruction history) may use all of a repo's commits, so a clone where the person works never looks dormant.
+6. **Once among the repositories in scope** (ruling, final review). The same commit can sit in several clones or forks, and every repo keeps its full commit list. The first rule (ruling, Task 2) marked one `owner` repo per commit among all repositories read; an excluded repository could then own a kept one's commits. Now each commit carries `id`, a keyed hash of its full sha (never the 7-hex key, whose collisions would drop unrelated commits), and `mine`; the analysis counts a commit once among the repositories in scope, by `id`. Per-repo matching (delivery, rework, instruction history) may use all of a repo's commits.
+7. **A cut list and a partial pass** (ruling, final review). A commit list cut short (the commit cap, the output cap or a timeout) carries `commitsReach`, and consumers leave out evidence before it. Any timeout or error that drops or cuts a repository makes the pass `partial`. A repository whose reported root is not the folder it was found in is skipped (`root-mismatch`). `RepoSignals.repos` is sorted by `repoKey` before it is returned, since completion order is not deterministic (ruling, Task 16b).
 
 **`classifyCommit`** looks at the message:
 - **AI co-authors:** `Co-authored-by:` lines are matched, case-insensitively, against these patterns. Non-AI co-authors are ignored.
@@ -994,7 +1010,7 @@ ScanResult.repos: RepoSignals;                          // status "off" when dis
       - Its object count is unchanged after the scan, and the repo is listed.
     - **Old git** (POSIX, ruling, Task 2): a runner that drops `GIT_NO_LAZY_FETCH`, on a partial clone with a non-origin promisor remote whose URL is an `ext::` command → its marker never appears.
     - **Git from the repo** (win32, ruling, Task 2): a `git.cmd` and a `git.exe` planted in the repo root never run.
-    - **Same commits twice** (ruling, Task 2): two linked worktrees give one repo; two separate clones each list every commit, and each commit is `owner` in exactly one of them.
+    - **Same commits twice** (ruling, Task 2): two linked worktrees give one repo; two separate clones each list every commit with the same `id`, counted once by the analysis (ruling, final review).
     - **Odd repos (Review Focus 4):**
       - repo 2 lives at a path with a space and a non-ASCII letter (`dir with space/ünï`) and is read like any other;
       - a repo of 8 commits read with `maxCommits: 5` keeps 5 commits and sets `commitsTruncated`.
@@ -1118,7 +1134,7 @@ export interface SessionTable {
   isHuman(p: PromptEv): boolean;      // origin human, or relabelled by the dedupe
   activity: Activity; capabilities: Capabilities;
   dedupe: { hostSessions: number; pairedPrompts: number; relabelled: number };
-  exclusions: { tools: number; projects: number; sessions: number }; orphans: Partial<Record<Ev["k"], number>>;
+  exclusions: { tools: number; projects: number; sessions: number; dateRange: boolean; weeksOutside: number }; orphans: Partial<Record<Ev["k"], number>>;   // five fields (ruling, final review)
 }
 export const PR_LINK_TOOLS: ReadonlySet<ToolId>;   // tools whose readers emit pr-link markers: claude-code
 export const SWITCH_TOOLS: ReadonlySet<ToolId>;    // tools whose readers emit model-switch and effort-switch markers: claude-code (pre-flight P10)
@@ -1143,15 +1159,15 @@ export function scanResultOf(events: Ev[], o?: { repos?: RepoSignals; cwds?: Map
   - not excluded.
 - **Exclusions.**
   - **Tools.** Drop that tool's rows.
-  - **Projects.** Drop the rows with that `projectKey`, together with their descendants.
-  - **Date range.** Drop whole sessions that lie outside `[from, to]`, and drop prompts and daily counts outside it from the activity.
+  - **Projects.** Drop the rows with that `projectKey`, together with their descendants. A project exclusion removes everything that carries the project: lifetime prompts and config entries carry a project key; ids, file facts and limit readings carry their session; active days come from in-scope prompts. The first rule dropped rows only. What cannot be attributed (per-day totals without a project, per-project memory files, lifetime prompts of a tool that records no project and whose session file is gone, commits of a repository that still has another folder in the report) is stated in the exclusions doc (ruling, final review).
+  - **Date range.** Drop whole sessions that lie outside `[from, to]`, and drop prompts and daily counts outside it from the activity. Weeks outside the range leave the weekly series; `exclusions.dateRange` says a range was given and `exclusions.weeksOutside` counts the active weeks outside it, so a favourable window cannot be chosen without trace (ruling, final review).
   - **Counts.** Count the tools excluded that had rows, the distinct projectKeys excluded, and the rows dropped.
 - **Orphan events.** Events whose `sessionId` names no row are counted per kind and left out of the per-session walk. This also covers Claude Code workflow-run totals: add one sentence about them to the semantics block in `events.ts`.
 - **Lifetime counts.** Activity, switches and exposure take events whether or not their session has a row.
   - Tool and date exclusions apply.
   - A project exclusion applies only when the session row is known.
 - **Dedupe.** Builder's call 9.
-  1. Pair detail-window prompts from different tools that have an equal `textHash` within 60 s of each other, one to one, earliest first. Only human or scripted prompts with more than 2 words, inside the date range, pair; shorter ones are not counted in a session's share (ruling, Task 4).
+  1. Pair detail-window prompts from different tools that have an equal `textHash` within 60 s of each other, one to one, earliest first. Only human or scripted prompts with more than 2 words pair; shorter ones are not counted in a session's share (ruling, Task 4). Host copies are decided before any exclusion, over every prompt: a copy is never counted, and its original follows its own exclusions. This reverses the first rule that pairing ignores excluded and out-of-range prompts, which let an excluded session come back through its copy (ruling, final review).
   2. A session pair has a host copy only when at least 3 prompts pair and ≥ 50% of BOTH sides' pairable prompts are paired (ruling, Task 4). The host copy is the `copilot` session with surface `vscode`; otherwise, the session whose tool sorts later.
   3. The host copy joins `hosts` and is left out of every metric.
   4. In the other session, paired prompts whose origin is `scripted` count as human (`isHuman`), and a top-level `scripted` row becomes `human`.
@@ -1235,7 +1251,7 @@ export function isAction(e: ToolEv): boolean;              // walk rule 2; Plan 
 export function briefScore(f: PromptFeatures): number;     // walk rule 11's brief score, the mean of its five marks; Plan 3 imports it (P3 pre-flight F14)
 export function inScope(r: SessionRow, t: SessionTable, store: EventStore, markersOf: (id: string) => readonly MarkerEv[]): boolean;   // a row inside the range, or with an event inside it (ruling, Task 6)
 // tiers.ts
-export function modelTier(model: string): 1 | 2 | 3 | undefined;  // 1 haiku|mini|nano|flash-lite|small; 2 sonnet|flash|standard (gpt-N, codex without max); 3 opus|max|pro|ultra|large
+export function modelTier(model: string): 1 | 2 | 3 | undefined;  // 1 haiku|mini|nano|flash-lite|small; 2 sonnet|flash|standard (gpt-N, codex without max); 3 opus|max|pro|ultra|large|fable|mythos (fable, mythos: ruling, final review)
 export function effortRank(effort: string): 1 | 2 | 3 | 4 | undefined;   // none|minimal|low 1, medium 2, high 3, xhigh|max|ultra 4
 export function childType(agentType: string | undefined): ChildType;  // /^explore(r)?$/i explore; /^plan$/i plan; /review/i review; general-purpose|claude|fork|default|workflow-subagent implement; 16-hex keyed hash custom; else other
 ```
@@ -1268,7 +1284,7 @@ export function childType(agentType: string | undefined): ChildType;  // /^explo
     - A brief is the first typed turn of an episode with intent `spec` or `question`.
     - It is corrected when the episode's next typed turn has intent `correction`.
     - Its score is the mean of [`hasContext`, `fileRefs ≥ 1`, `listLines ≥ 2`, `constraintTerms ≥ 1`, `lenBucket ≥ 2`], computed by the exported `briefScore(f)` (P3 pre-flight F14).
-12. **Work per turn.** For each episode with at least one action, `typed turns / log2(2 + episode actions)`.
+12. **Work per turn.** Per instruction: an episode's first typed turn or a later brief, with the follow-up turns after it (slash-command turns are no turns), with at least one action: `typed turns / log2(2 + actions)`. It was per episode; a long sitting then read as poor steering, and clearing the context raised the score. The signal is shown and no longer scored (Task 7) (ruling, final review).
 13. **Children.**
     - A child is finished unless it has a `stopped-by-user` interrupt, or its last two actions both have `ok === false`.
     - **Fan-out** counts DIRECT children only; deeper descendants feed `maxDepth` and `A_t`, never fan-out, as spec §6.4 lists fan-out and depth apart (ruling, Task 5). A grandchild always groups under its direct ancestor.
@@ -1287,7 +1303,7 @@ export function childType(agentType: string | undefined): ChildType;  // /^explo
       - an own commit of that repo has `ts` in [episode start, episode end + `DELIVERY_WINDOW_MS`]; or
       - a `commit` or `pr-link` marker of the row falls in that interval.
     - `prKeys` and `commitShaKeys` are the marker details. Like commits, a PR or commit key that several rows name belongs to the earliest-starting row only (ruling, Task 5).
-18. **Landed units.** Each own commit with `owner: true` (ruling, Task 2) is assigned to the latest-starting `detailTop` row of its repo with `start ≤ ts ≤ end + DELIVERY_WINDOW_MS`. A row's landed units = |`commitShaKeys` ∪ the `shaKey`s assigned to it| + its distinct PRs.
+18. **Landed units.** Each own commit, counted once by `id` (ruling, final review), is assigned to the latest-starting `detailTop` row whose window holds it, `start ≤ ts ≤ end + DELIVERY_WINDOW_MS`, now also across the repositories in scope. A row's landed units = |`commitShaKeys` ∪ the `shaKey`s assigned to it| + its distinct PRs.
 19. **Buckets.** Over the actions of the row and its descendants.
 20. **Scripted rows.** A row is scripted when its origin is `scripted` or `scheduled`. It has no turns, but it carries buckets, tokens and children.
 
@@ -1380,7 +1396,7 @@ export function computeSignals(sample: readonly SessionStats[], g: Globals): Sig
 | `fanoutPerEpisode` | Σ`finishedChildren` / Σ`episodes` | episodes |
 | `correctionRate` | Σ`correctedBriefs` / Σ`briefs` | briefs |
 | `healthyInterruptShare` | Σ`healthyInterrupts` / Σ`interrupts` | interrupts |
-| `turnsPerWork` | Σ`turnsPerWorkSum` / Σ`workEpisodes` | work episodes |
+| `turnsPerWork` | Σ`turnsPerWorkSum` / Σ`workEpisodes`, per instruction (walk rule 12); shown, not scored (ruling, final review) | instructions with an action |
 | `briefScore` | Σ`briefScoreSum` / Σ`briefs` | briefs |
 | `hygiene` | mean of the available parts: manual share = Σ`compactManual` / Σ(`compactAuto` + `compactManual`); fresh share = Σ`freshEpisodes` / Σ`episodes` | compactions + episodes |
 | `rho` | Spearman correlation (average ranks) over the merged `tierPairs`; null under 3 pairs or when either side is constant | pairs |
@@ -1392,7 +1408,14 @@ export function computeSignals(sample: readonly SessionStats[], g: Globals): Sig
 
 **Global:**
 - An **active repo** is the `repoKey` of at least one `detailTop` row.
-- **Owner commits** (ruling, Task 2): whole-report totals (`reworkShare`'s commits, `aiCoauthoredShare`, `ownCommits`) count commits with `owner: true` only. Per-repo matching (a commit after a session, a later fix) may use any commit of the repo.
+- **Commits once** (ruling, Task 2; final review): whole-report totals (`reworkShare`'s commits, `aiCoauthoredShare`, `ownCommits`) count each commit once among the repositories in scope, by `id`. Per-repo matching (a commit after a session, a later fix) may use any commit of the repo. A session or episode that ended before a cut list's `commitsReach` is in no delivery denominator, and the rework and co-authored windows start at the reach.
+- **Final-review signal rules** (ruling, final review):
+  - `tokensPerLanded` (`jud.cost`) is null below 5 landed units; its doc says it follows commit cadence.
+  - `reworkShare` is `not-captured` when no commit by anyone in the kept repositories' window is marked as rework; its doc says it reads commit-message conventions.
+  - `artifacts`: when a config source was read, none in use is a measured 0.
+  - `parallelShare`: rows driven by another tool's agent, or subagent rows without a parent link, are delegated work and never make a bucket parallel.
+  - `correctionRate` is `not-captured` when the intent classifier's English opener lexicon evidently does not fit: fewer than 1% of at least 200 human prompts open as a correction, redirect, continuation or acknowledgement. Without the guard, a person who writes in another language gets a perfect correction score.
+  - A new unscored signal, `uncheckedCommandShare`: among the code-edit turns that count as not checked, the share where a command the classifier gave no check kind ran after the last edit.
 - **One rule for detail rows** (ruling, Task 6): kept repos, the artifacts' child types and named MCP calls all read the kept detail-window rows (no host copy). A repo, child or call seen only in lifetime-window sessions never counts, so the "detail"-labelled metrics never draw on lifetime-only sessions.
 
 | Signal | Definition | n |
@@ -1462,6 +1485,7 @@ export function displayScore(z: number): { score: number; openTail: boolean };  
 - `x` is the transformed value, oriented so that higher is better; `−` marks a negated component.
 - Units: `s` means resampled per session; `f` means fixed in the bootstrap.
 - Each p50/p90 is stored to 4 decimals and carries the rationale shown. Rationales use only characters Plan 3's fonts cover: "about", never ≈, and "rho", never ρ; the lev.sticky and jud.rho rows are worded so (P3 pre-flight F1).
+- **Steering has two components, half each** (ruling, final review). The first table held `ste.turnsPerWork` at 0.3 (with 0.4 and 0.3 for the others). Every form of it measured leverage, the length of a sitting or the wording of follow-up turns, never steering, so it left the scored components and stays an unscored signal. The table has 21 scored components.
 - The rationale is what the reader sees, so a logit anchor equals the fraction its rationale states: "two thirds" is 0.6931, "a third" and "one of three" are −0.6931. The ver.closure, ver.guardrails and ctx.hygiene anchors are set so (ruling, Task 7).
 
 | id | dim · w · unit | transform | p50 | p90 | rationale |
@@ -1475,9 +1499,8 @@ export function displayScore(z: number): { score: number; openTail: boolean };  
 | ver.vae | V · 0.5 · s | logit | −0.4055 | 1.0986 | 4 in 10 code-edit turns checked after the last edit; 3 in 4 |
 | ver.closure | V · 0.3 · s | logit | 0.6931 | 1.9924 | two thirds of failing checks pass later in the episode; nearly 9 in 10 |
 | ver.guardrails | V · 0.2 · f | logit | −0.6931 | 1.3863 | one of three guardrails per active repo; most of them |
-| ste.correction | S · 0.4 · s | logit − | 1.7346 | 2.7515 | 15% of briefs need a correction next; 6% |
-| ste.interrupts | S · 0.3 · s | logit | 0 | 1.2657 | half of interrupts are early, substantive redirects; nearly 4 in 5 |
-| ste.turnsPerWork | S · 0.3 · s | log1p − | −0.5878 | −0.3716 | 0.8 typed turns per doubling of work; 0.45 |
+| ste.correction | S · 0.5 · s | logit − | 1.7346 | 2.7515 | 15% of briefs need a correction next; 6% |
+| ste.interrupts | S · 0.5 · s | logit | 0 | 1.2657 | half of interrupts are early, substantive redirects; nearly 4 in 5 |
 | ctx.instructions | C · 0.35 · f | logit | −0.4055 | 1.7346 | 4 in 10 active repos keep a maintained instruction file; 85% |
 | ctx.artifacts | C · 0.35 · f | log1p | 1.3863 | 2.3979 | three provenance-weighted artifacts in use (two own skills plus a few installed); ten |
 | ctx.hygiene | C · 0.15 · s | logit | −0.6931 | 0.6931 | a third of compactions and episode starts are deliberate; two thirds |
@@ -1504,7 +1527,6 @@ export function displayScore(z: number): { score: number; openTail: boolean };  
 | ver.guardrails | `guardrails` |
 | ste.correction | `correctionRate` |
 | ste.interrupts | `healthyInterruptShare` |
-| ste.turnsPerWork | `turnsPerWork` |
 | ctx.instructions | `maintainedShare` |
 | ctx.artifacts | `artifacts` |
 | ctx.hygiene | `hygiene` |
@@ -1536,7 +1558,7 @@ Delivery is `not-measured` when `repoSignals` is `off` or `git-missing`.
 - `insufficient` reports `n` and `needs` of the binding part, and `part` names it, so a report can say what is short (ruling, Task 7).
 - When the evidence ratio is ≥ 1 but there is no distinct week, the weeks bind: `part` is `weeks`, `n` = weeks, `needs` = 1 (ruling, Task 7).
 - Confidence uses `weeks = evidence.weeks`, with builder's calls 3–5.
-- **Numeric guards** (ruling, Task 7): each component z is clamped to [−8, 8], a bound no realistic input reaches, which keeps every later sum finite. The shown z is `zRaw · (r / (r + 1))`, with `zRaw` the unshrunk weighted mean. A dimension whose z is not finite is `not-measurable`.
+- **Numeric guards** (ruling, Task 7): each component z is limited to [−3, 3] before it enters its dimension, as a scoring rule. It was clamped to [−8, 8] as a numeric guard only; ordinary habits pushed one component far beyond 3 and its dimension to 1 (ruling, final review). The shown z is `zRaw · (r / (r + 1))`, with `zRaw` the unshrunk weighted mean. A dimension whose z is not finite is `not-measurable`.
 - A component's `weight` is its effective weight: the pinned weight spread over the measured components when the dimension is `scored` or `insufficient`, else 0 (ruling, Task 7).
 - `dimension.meta.window` is `detail`.
 
@@ -1552,7 +1574,7 @@ Delivery is `not-measured` when `repoSignals` is `off` or `git-missing`.
     - log1p of −3 → 0;
     - atanh of 1 → `atanh(0.95)`.
   - `reference`:
-    - v0 loads 22 components, whose ids equal the component table's;
+    - v0 loads 21 components, whose ids equal the component table's (ruling, final review);
     - every `p90 > p50`, and every rationale is non-empty.
   - `score`:
     - **At the anchors:**
@@ -1721,7 +1743,7 @@ export interface ArtifactUse { kind: ConfigEv["kind"]; name: string; provenance:
 export function artifactUse(raw: ScanResult, t: SessionTable, s?: AnalysisScope): ArtifactUse[];   // the Task 6 artifacts rule
 // promptwindow.ts (owned by Task 12; ruling, Task 12)
 export function promptWindowByTool(raw: ScanResult, t: SessionTable): Map<ToolId, Window>;   // the window with more human prompts in scope; a tie → detail
-export function projectLabels(salt: Uint8Array, keys: Iterable<string>): Map<string, string>;   // "P-" + upper-case 4 hex of keyedHash(salt, "label:" + key); 6 hex for keys that collide
+export function projectLabels(salt: Uint8Array, keys: Iterable<string>): Map<string, string>;   // "P-" + upper-case hex of keyedHash(salt, "label:" + key): the shortest of 4, 6, … 16 digits unique among the keys (was 4, or 6 on a collision) (ruling, final review)
 export function projects(t: SessionTable, labels: Map<string, string>): ProjectSummary[];
 export function roles(dims: readonly DimensionResult[], stack: Stack): string[];
 ```
@@ -1800,7 +1822,7 @@ export function roles(dims: readonly DimensionResult[], stack: Stack): string[];
     - `hooksDisabled` from the feature event;
     - a coverage row with drift has `formatChanged: true`;
     - day parts at the hour boundaries.
-  - **Labels:** 5 keys give 5 distinct labels matching `^P-[0-9A-F]{4}$`; a forced collision gives 6 hex for the colliding keys; another salt gives other labels (ruling, Task 10).
+  - **Labels:** 5 keys give 5 distinct labels matching `^P-[0-9A-F]{4}$`; a forced collision gives longer labels for the colliding keys, up to 16 hex, over every project key seen on sessions, prompts and config entries (ruling, final review); another salt gives other labels (ruling, Task 10).
   - **Finite** (ruling, Task 10): on an empty scan and a small one, every number in exposure, panels and roles is finite.
   - **Roles:**
     - with Task 9's pinned extensions (pre-flight P12), the expert persona's roles are Backend (its `go` edits), then the roles of its top-z dimensions; the intermediate's first role is Frontend (its `tsx` edits);
@@ -1822,7 +1844,8 @@ export function roles(dims: readonly DimensionResult[], stack: Stack): string[];
 ```ts
 export type CheckStatus = "pass" | "note" | "warn" | "fail" | "n/a" | "info";
 export type CheckId = "C1" | "C2" | "C3" | "C4" | "C5" | "C6" | "C7" | "C8" | "C9" | "C10"
-  | "soft:rhythm" | "soft:repeated-long" | "soft:recent-burst" | "soft:unclosed-tools" | "soft:new-config";
+  | "soft:rhythm" | "soft:repeated-long" | "soft:recent-burst" | "soft:unclosed-tools" | "soft:new-config"
+  | "soft:no-server-pass" | "soft:missing-ids";   // the last two (ruling, final review)
 export interface CheckResult { id: CheckId; status: CheckStatus; n: number; reason: string; values: Record<string, number | string>; askAbout?: string; tools: ToolId[] }
   // Task 13b closes `reason` to the `Reason` union and `values` to `CheckValues` (ruling, Task 13b)
 export function checkAnchors(raw: ScanResult): [CheckResult, CheckResult];    // C1, C2
@@ -1838,30 +1861,33 @@ export function checkFileTimes(raw: ScanResult, o: { timeZone: string }): CheckR
   2. Fewer than 50 recognized anchors → `n/a` (`too-few`).
   3. **Decoded value:** `v = Number(base58(idTail.slice(2, 14)) − min over the sample)`, computed with BigInt (pre-flight P7).
   4. **Fit** (ruling, Task 11), over a deterministic stride sample of at most 5,000 anchors. The start is the most-inliers line: of the candidate lines through pairs of the sample half the sample apart in `v` order, the one with the most sample points within 10 min. Then refit by least squares on the sample points within 10 min of it. A plain least-squares start would let a few wild ids drag the line flat and turn a fail into `n/a`. With more than half of the sample genuine, a genuine candidate exists, so fabricated or edited ids up to just under half fail C1. The comment says that a fabricated line can still win the start, in which case the check still fails.
-  5. A median |residual| > 10 min, meaning no line holds half of the anchors → `n/a` (`scheme-changed`).
-  6. **C1** fails when more than 1% of the anchors are off by more than 10 min. Its values are `offShare` and `p99Seconds`.
-  7. **C2** is Spearman of `v` against `ts` over a stride sample of at most 20,000. It fails below 0.99, and is `n/a` wherever C1 is `n/a`.
+  5. A median |residual| > 10 min, meaning no line holds half of the anchors → `n/a` (`scheme-changed`). Replaced (ruling, final review): no line, a line holding under 10% of the ids, or a line whose slope is not positive → `n/a`. The candidate pairs are tried half, an eighth and a sixty-fourth of the sample apart, since an even split and a genuine block of half the ids or fewer otherwise gave no usable line.
+  6. **C1** fails when more than 1% of the anchors are off by more than 10 min. Its values are `offShare` and `p99Seconds`. Replaced (ruling, final review):
+     - **An id is evidence about time only where its implied time is plausible**: not after the scan's end, and within a year of the main group's span. Such an id more than 10 min off the line is *off*; any other is *foreign* (another encoding, a gateway's own ids) and never off. A moved block of genuine ids keeps its values, so the line maps it back next to the rest of the history; a new encoding maps nowhere sensible. This replaced a split rule that judged slopes and gaps between two groups of ids, which three review rounds showed could not tell a re-timed block from a new encoding.
+     - Off ids are judged first, over this encoding's ids only: at least 3 and more than 1% → fail; more than 1% with fewer than 3 → note.
+     - Only a kind that does not fail may then be made unverified by foreign ids: 10 or more on a line of their own → `n/a` (`scheme-changed`) at any split ratio, never a fail; else more than 10% of the ids → `n/a` (`foreign-ids`); 2 or more and over 1% → note.
+     - Stated limits, each pinned by a test: a history moved in time as one block passes C1 and C2; ids invented to grow with time, with another slope or far-off values, read as another encoding; a history stretched gradually passes; a new encoding whose values carry on from the old ones at another slope fails, because a stretched block of genuine history has that shape.
+  7. **C2** is Spearman of `v` against `ts` over a stride sample of at most 20,000. It fails below 0.99, and is `n/a` wherever C1 is `n/a`. It ranks only the ids on C1's line and needs 200 of them spanning at least 24 h (ruling, final review).
 - **C3.**
   - **Match:** the share of human transcript prompts (`claude-code.transcripts`, detail) that have a `claude-code.history` prompt with an equal `textHash` within 10 s.
     - Only prompts inside the history's span count.
     - **Pasted prompts** (ruling, Task 11): the history hashes a prompt as displayed, so a prompt with a paste never hash-matches. An unmatched transcript prompt also matches a history prompt with `hasPaste` within 10 s, of the same session where both name one. This is a maximum one-to-one matching: the earliest feasible history prompt, over time-sorted lists, each used at most once.
     - Below 75%, the result is `warn`.
-  - **Missing days:** UTC days that have human transcript prompts, fall inside the span of the `claude-code.stats` days, and have no stats `DailyEv`. Builder's call 8 decides fail or note.
+  - **Missing days:** UTC days that have human transcript prompts, fall inside the span of the `claude-code.stats` days, and have no stats `DailyEv` for that day or either neighbour (ruling, final review). Builder's call 8 decides warn or note; C3 never fails.
   - **Each part runs on its own** (ruling, Task 11): `n/a` without human transcript prompts. Otherwise the match part runs when the history has data, and the missing-days part when the stats cache does; `n/a` only when neither can run. A pass says which parts ran: reason `ok`, `ok-history-only` or `ok-stats-only`, so a pass never reads as if both comparisons were made.
 - **C4.**
   - Compare session `IdentityEv` hashes with config hashes.
-  - A 0% match → `fail`.
+  - A 0% match → `warn`; it was `fail` (ruling, final review).
   - More than 1 distinct session hash → `note`, with the value `accounts`.
   - `n/a` when either side is missing.
 - **C5**, over `FileFactEv`.
-  - **Violations:** a file violates when either holds:
-    - `mtime < lastTs − 2 s`;
-    - `ctime − mtime > 24 h`, unless the file is in the restore cluster or a bulk-change window.
+  - **Violations:** a file violates when `mtime < lastTs − 2 s`, unless it is still being written during the scan. The second violation, `ctime − mtime > 24 h`, is gone: a file changed more than a day after its last write is a note (`changed-after-write`) (ruling, final review).
   - **Restore cluster:**
     - find the 10-min window holding the most file births (birth, else ctime);
     - it is a cluster when it holds at least 80% of the files, and those files' events span more than 7 days;
     - a cluster gives `note` with the value `date` (local `YYYY-MM-DD`).
-  - **Bulk change** (ruling, Task 11; builder's call 8): among the files with `ctime − mtime > 24 h`, each 10-min ctime window holding at least max(5, 10% of all files), largest first and without overlap. With no restore cluster, a bulk change gives `note` (`bulk-change`) with the largest window's local `date` and `bulkFiles`. Fail still wins when the violators outside every window reach the threshold.
+  - **Bulk change** (ruling, Task 11; builder's call 8): among the files with `ctime − mtime > 24 h`, each 10-min ctime window holding at least max(5, 10% of all files), largest first and without overlap. With no restore cluster, a bulk change gives `note` (`bulk-change`) with the largest window's local `date` and `bulkFiles`. Fail still wins when the violators outside every window reach the threshold. Removed with the ctime violation, and the reason `bulk-change` with it (ruling, final review).
+  - Stated limit: an edit that keeps the file times passes C5 (ruling, final review).
   - **Thresholds:** fail and minimum file count follow builder's call 8.
 - **Ask-about wording.** Each check gets one fixed English question that names only numbers and dates. For example, C5's note asks: "Most trace files were created on {date} although their activity spans {days} days. Was this history copied or restored from a backup then?" Every `reason` and `askAbout` string, in this task and Task 12, uses only characters Plan 3's fonts cover (U+0020–00FF, U+2000–206F and `−` U+2212): words such as "at least", "at most", "to" and "about", never ≈ → ≤ ≥ (P3 pre-flight F1).
 
@@ -1869,7 +1895,8 @@ export function checkFileTimes(raw: ScanResult, o: { timeZone: string }): CheckR
   - **C1/C2:**
     - A genuine-like set: 2,000 anchors whose `idTail` is `01` followed by base58 that encodes time linearly, the shape the reader emits → C1 `pass`, C2 `pass` (pre-flight P7).
     - **Edited timestamps:** shift 3% of the anchors by +2 h → C1 `fail`.
-    - **Fabricated:** append a session of 100 random base58 ids at plausible times → C1 `fail`.
+    - **Fabricated:** append a session of 100 random base58 ids at plausible times → C1 `fail`. Now unverified (`foreign-ids` or a note): invented ids and a gateway's ids look the same (ruling, final review).
+    - **Moved block** (ruling, final review): a genuine block re-timed by hours fails C1; a whole history moved as one block passes (a known-limit test); a real change of encoding reads `scheme-changed` at every split ratio.
     - Every id out of scheme → `n/a`.
     - Reversed order → C2 `fail`.
     - **Wild ids** (ruling, Task 11): a few fabricated ids far off the line still give C1 `fail`, never `n/a` `scheme-changed`.
@@ -1877,20 +1904,20 @@ export function checkFileTimes(raw: ScanResult, o: { timeZone: string }): CheckR
   - **C3:**
     - 10 transcript prompts, 9 of them in history → `pass`;
     - 6 of 10 in history → `warn`;
-    - 3 transcript days missing from the stats span → `fail`;
+    - 3 transcript days missing from the stats span → `warn` (was `fail`); a day held under its neighbour's date counts as present (ruling, final review);
     - a single missing day → `note`;
     - a day after the stats span → not counted;
     - a pasted prompt matches by time, one to one; only one store present → `ok-history-only` or `ok-stats-only` (ruling, Task 11).
   - **C4:**
     - matching hashes → `pass`;
-    - no match → `fail`;
+    - no match → `warn` (was `fail`) (ruling, final review);
     - 2 session accounts → `note`.
   - **C5:**
     - clean files → `pass`;
     - 3 files with `mtime < lastTs` → `fail`;
     - **copied directory:** 20 files all born within one 10-min window, spanning 30 days of events → `note`, with that date;
     - in a restore cluster, `ctime ≫ mtime` is not a violation;
-    - **migrated files** (ruling, Task 11): files that keep birth and mtime, with ctime set in one 10-min window → `note` (`bulk-change`), not `fail`;
+    - **migrated files** (ruling, Task 11): files that keep birth and mtime, with ctime set in one 10-min window → `note` (`bulk-change`), not `fail`; now `changed-after-write`, and a change time alone never fails (ruling, final review);
     - 4 files → `n/a`.
 - [ ] **Step 2: Run** `bun test test/core/forensics` → FAIL.
 - [ ] **Step 3: Implement** C1–C5 and their ask-about texts.
@@ -1922,22 +1949,23 @@ export function runForensics(raw: ScanResult, t: SessionTable, stats: readonly S
 **Rules.**
 - **C6.**
   - Each `RolloutFactEv` needs a `ThreadRowEv` with the same `threadId`.
-  - Rollouts missing one: at least max(2, 1% of the checked rollouts) → `fail`; fewer, but at least 1 → `note` with the same question (ruling, Task 12; builder's call 8).
+  - Rollouts missing one: at least max(2, 1% of the checked rollouts) → `fail`; fewer, but at least 1 → `note` with the same question (ruling, Task 12; builder's call 8). Now `warn` at that threshold, never a fail, and a pass needs 5 rollouts (ruling, final review).
   - Rollouts with `fileTs` within 10 min of `now` are excluded.
   - **Index span** (ruling, Task 12): when a row carries `createdAt`, rollouts that began before the earliest `createdAt` are not checked and are counted in `values.beforeIndex`. A rollout's start is read on the same clock as `createdAt`: its `uuidTs` where it has one, else its `fileTs`. When every rollout began before the index → `n/a`, reason `before-index` (ruling, Task 13).
   - `n/a` when `codex.threads` coverage is not `ok` or `drift` with records > 0, or when there are no rollouts.
 - **C7.**
   - A violation is `uuidTs − fileTs > 1,000 ms`.
   - An offset that is a non-zero whole number of quarter hours, within ±2 s, up to 26 h, is a time-zone change: `note`, not a violation (pre-flight P17; ruling, Task 12).
-  - Any violation → `fail`.
+  - Any violation → `fail`. Now at least max(2, 1% of the rollouts) → `fail`, fewer → `note`, and a pass needs 5 rollouts (ruling, final review).
 - **C8.**
   - Per (bucket, window): sort by `ts`.
   - Pair consecutive snapshots of one reset window: `|resetsAt diff| ≤ 60 s`. A snapshot without `resetsAt` is never paired: nothing tells which window it belongs to, and pairing by `windowMinutes` misfires on every reset (ruling, Task 12).
-  - A drop is a pair whose reading falls by more than 2 points. Drops are contradictions only in a reset window that holds two or more of them (ruling, Task 12). Builder's call 8 decides the thresholds.
+  - A drop is a pair whose reading falls by more than 2 points. Drops are contradictions only in a reset window that holds two or more of them (ruling, Task 12). Now a drop counts when the lower reading is stamped more than 10 min after the higher one, and C8 never fails (ruling, final review). Builder's call 8 decides the thresholds.
+  - Stated limit: a two-account splice whose limits reset at different times, or whose readings sit within 10 min of each other, passes C8 (ruling, final review).
 - **C9.**
   - **Matching:** a session's model matches the first `match`; its version matches an exact tool entry.
   - **Violation** (ruling, Task 12): a model's FIRST USE in the session, the earliest event that carries it, more than 2 days before the matched release date. A version, or a model no event carries, is compared with the row's end. "Used before release" is about use, so a thread started before a release and resumed after it with the new model passes.
-  - **Result:** any violation → `fail`; `n/a` when nothing matches.
+  - **Result:** any violation → `fail`; `n/a` when nothing matches. Now any violation → `warn` that asks about early access, and `fail` only at max(3, 1% of the dated sessions) more than 90 days before the release (`long-before-release`) (ruling, final review).
   - **Shipped `releases.json`:** only entries whose public release date is certain to the builder, each with a public `source` URL. Each shipped date is confirmed against its vendor source page, and an entry that cannot be confirmed is removed: a date that is too late fails early adopters on genuine data (ruling, Task 12). An unlisted model or version is not checked. Tests inject their own table. It loads with `import … with { type: "json" }`, so a compiled binary carries it (P3 pre-flight F17).
 - **Soft flags:**
 
@@ -1949,19 +1977,22 @@ export function runForensics(raw: ScanResult, t: SessionTable, stats: readonly S
   | unclosed-tools | > 10% of Claude Code detail `ToolEv`s have neither `ok` nor `outcome` |
   | new-config | at least 3, and at least half, of the used artifacts (`artifactUse`) have `firstSeen ≥ now − 7 days`; the value is their count. One newly added skill must not keep an active honest user at "with notes", and the question allows for tool updates (ruling, Task 12) |
 
-  A raised flag is a `note`; otherwise `pass`. Every flag is `n/a` without data. `rhythm` and `repeated-long` take each tool's prompts from one window, by Task 10's prompt-window-per-tool rule (pre-flight P18).
+  | no-server-pass (ruling, final review) | no check on server-issued data passed through a backed tool with typed turns in scope; `n/a` when every check tied to an anchorable tool is `n/a` |
+  | missing-ids (ruling, final review) | a tool that records server ids on its turns has at least 50 typed turns in scope and no id at all |
+
+  `rhythm` measures at least 5 sessions (ruling, final review). A raised flag is a `note`; otherwise `pass`. Every flag is `n/a` without data. `rhythm` and `repeated-long` take each tool's prompts from one window, by Task 10's prompt-window-per-tool rule (pre-flight P18).
 - **Band** (ruling, Task 12), derived from every result, never from `worst()`:
   1. `inconsistent` if any check fails.
   2. Otherwise `unverifiable` when every check tied to an anchorable tool's records (C1–C4, C6–C8) is `n/a`, whatever C5, C9 or the soft flags say: a C9 or C5 pass on Cursor-only data must not read "consistent".
-  3. Otherwise `consistent-with-notes` if any check is `warn` or `note`, any soft flag is raised, or ids exist but cannot be verified: a C1 or C2 result that is `n/a` for a reason other than `too-few`, or whose `unverifiedKinds` is above 0.
-  4. Otherwise `consistent`.
-- **Anchorable tools.** `claude-code` and `codex` are anchorable. `cursor`, `copilot`, `antigravity` and P2 tools are not.
-- **Server-backed share** (display only) = typed turns from tools whose server checks passed or noted (claude-code: C1 and C2; codex: C8) / all typed turns, both summed from `stats`.
+  3. Otherwise `consistent-with-notes` if any check is `warn` or `note`, any soft flag is raised, or ids exist but cannot be verified: a C1 or C2 result that is `n/a` for a reason other than `too-few`, or whose `unverifiedKinds` is above 0. Also when no check on server-issued data (C1, C2, C8) passed (ruling, final review).
+  4. Otherwise `consistent`. So `consistent` needs a pass backed by server-issued data, and tools without server ids read `consistent-with-notes` at best (ruling, final review).
+- **Anchorable tools.** `claude-code` and `codex` are anchorable. `cursor`, `copilot`, `antigravity` and P2 tools are not. A tool counts as anchorable when its traces record server-issued data or one of its server checks measured something (ruling, final review).
+- **Server-backed share** (display only) = typed turns from tools whose server checks passed or noted (claude-code: C1 and C2; codex: C8) / all typed turns, both summed from `stats`. Now a tool is backed when one of its server-anchored checks passes or notes and none fails or warns; an `n/a` check counts for nothing. The first rule let the band read `consistent` while the share read 0 (ruling, final review).
 
 - [ ] **Step 1: Write the failing tests.** These include the §10 spliced-ledger tamper suite, which must be flagged.
   - **C6:**
     - every rollout has a row → `pass`;
-    - 2 rollouts missing their rows → `fail`; 1 → `note` with the same question; the threshold is max(2, 1% of the checked rollouts) (ruling, Task 12);
+    - 2 rollouts missing their rows → `warn` (was `fail`) (ruling, final review); 1 → `note` with the same question; the threshold is max(2, 1% of the checked rollouts) (ruling, Task 12);
     - rollouts named before the index's earliest row are not checked; all of them before it → `n/a` (`before-index`) (ruling, Task 12);
     - a rollout named 2 min before `now` is ignored;
     - no thread store → `n/a`.
@@ -1971,16 +2002,17 @@ export function runForensics(raw: ScanResult, t: SessionTable, stats: readonly S
     - an offset of exactly +3 h → time-zone `note`; quarter hours up to 26 h are zone changes (ruling, Task 12).
   - **C8:**
     - a monotone ledger → `pass`;
-    - **spliced ledgers:** two accounts' snapshots interleaved in one window → `fail`, with the "more than one account" ask-about;
+    - **spliced ledgers:** two accounts' snapshots interleaved in one window → `fail`, with the "more than one account" ask-about; now `warn`, whose question also names a reset by the service (ruling, final review);
     - one drop in each of several windows → `pass`; snapshots without `resetsAt` across resets → not failed (ruling, Task 12);
     - 10 pairs → `n/a`.
-  - **C9:** with an injected table, a model used 5 days before its release → `fail`; 1 day before → `pass`. A session started 10 days before the release whose model is first used after it → `pass` (ruling, Task 12).
+  - **C9:** with an injected table, a model used 5 days before its release → `warn` (was `fail`), and 3 sessions more than 90 days before it → `fail` (ruling, final review); 1 day before → `pass`. A session started 10 days before the release whose model is first used after it → `pass` (ruling, Task 12).
   - **Soft flags:** each one's raise and pass cases. A long prompt present in both windows counts once toward `repeated-long` (pre-flight P18).
     - rhythm: constant, jittered and uniformly random gaps are raised; a human-like heavy-tailed mix, and one scripted session among human-like ones, are not (ruling, Task 12);
     - new-config: 3 new of 6 are raised; 1 new of 10, or 2 new of 2, are not (ruling, Task 12).
   - **Band:**
     - only Cursor and Copilot data → `unverifiable`, with `notAnchorable` listing them; with a C5 or C9 pass too (ruling, Task 12);
     - a C3 warn and nothing failing → `consistent-with-notes`;
+    - passes on local records only, with no server-backed pass → `consistent-with-notes` with `soft:no-server-pass` (ruling, final review);
     - ids that exist but cannot be verified downgrade a passing band to `consistent-with-notes` (ruling, Task 12);
     - a C1 fail → `inconsistent`;
     - `serverBacked` equals the expected share, and a forensic fail never changes any dimension score.
@@ -2006,7 +2038,7 @@ export interface Analysis {
   meta: { core: string; reference: "v0"; bootstrap: number; seed: number; now: number; timeZone: string; repoSignals: RepoSignals["status"] };
   coverage: CoveragePanel; signals: Signals; dimensions: DimensionResult[]; overall: Overall; personas: string[];
   exposure: Exposure; stack: Stack; risk: RiskPosture; config: ConfigPanel; projects: ProjectSummary[]; forensics: Forensics;
-  identity: { accounts: number; hashes: string[] }; exclusions: { tools: number; projects: number; sessions: number };
+  identity: { accounts: number; hashes: string[] }; exclusions: { tools: number; projects: number; sessions: number; dateRange: boolean; weeksOutside: number };
   diagnostics: { orphans: Partial<Record<Ev["k"], number>>; dedupe: { hostSessions: number; pairedPrompts: number; relabelled: number }; warnings: Warning[] };
   private: { dayParts: DayParts; config: Array<{ kind: ConfigEv["kind"]; name: string; key: string /* pre-flight P15 */; provenance: ConfigEv["provenance"]; used: boolean }>;
     models: Record<string, number> /* raw model id → count, pre-flight P13 */ };
@@ -2014,8 +2046,9 @@ export interface Analysis {
 export function analyze(raw: ScanResult, o?: AnalyzeOptions): Analysis;
 export class ExclusionError extends RangeError {}   // an exclude.projects entry that names no label or key (ruling, Task 13)
 ```
-- **Exclusions fail closed** (ruling, Task 13). An `exclude.projects` entry is a label, matched without regard to letter case, or a projectKey, matched exactly. An entry that names neither throws `ExclusionError`: a typo must never silently exclude nothing. Its message quotes the entry only when it has the shape of a label or key.
+- **Exclusions fail closed** (ruling, Task 13). Every exclusion fails closed: an unknown tool id, and a non-finite or reversed date, also throw `ExclusionError`, which never quotes free text (ruling, final review). An `exclude.projects` entry is a label, matched exactly but without regard to letter case and never as a prefix (labels now vary in length), or a projectKey, matched exactly (ruling, final review). An entry that names neither throws `ExclusionError`: a typo must never silently exclude nothing. Its message quotes the entry only when it has the shape of a label or key.
 - **An exclusion leaks nothing** (ruling, Task 13):
+  - The exported record has five fields: `tools`, `projects`, `sessions`, `dateRange` and `weeksOutside` (ruling, final review).
   - `identity` keeps a session-scope hash only when its session is a kept row (not excluded by project or date, no host copy). Config-scope hashes, and session hashes that name no session, are kept per kept tool.
   - `coverage` rows' `from`/`to` are clipped to the date range: a span that starts before the range tells a reader that earlier data exists.
   - `diagnostics.warnings` drops the warnings of excluded tools.
@@ -2197,12 +2230,18 @@ export class RevealError extends ExportError {}   // a reveal label that names n
 - A fixed-length tuple, such as an interval, is all or nothing.
 - Every count is a non-negative safe integer. A sum over folded entries fails as soon as one input is not. A NaN in an optional field throws instead of vanishing. Shares and weights are range-checked to 0..1.
 - Caps are applied by the builder, which folds the overflow into `other` (models) or `otherProjects`; it never truncates or skips an entry silently, but passes it on, so the comparison throws.
-- A `reveal` label that names no exported project throws `RevealError`. Label matching ignores case, and the last entry for a label wins.
+- A `reveal` label that names no exported project throws `RevealError`. Label matching is exact but ignores case, never a prefix, and the last entry for a label wins (ruling, final review).
 
 **Model ids** (ruling, Task 14). The rule stops ACCIDENTAL disclosure of a deployment or customer name that rides on a public family prefix (`gpt-4o-contoso-prod`). It is not a defence against a person who deliberately encodes data in their own model ids: they control their own machine and their own export.
 - `ft:` → `fine-tuned`. Characters other than a–z, 0–9, `.` and `-`, or more than 64 of them → `other`. An unknown family → `other`.
 - After a known family, at most 6 hyphen-separated tokens. Each is a word from a fixed list of public tier and variant words; one of at most 2 versions (1–2 digits, or 1–3 with the size suffix `b`; at most a 1-digit fraction; no leading zero; the optional `o` suffix); or part of the one real date, in a public form (`YYYYMMDD`, `YYYY-MM-DD` as three tokens, or `MMDD`). Such an id is kept as is.
 - Any other id of a known family → `<family>-other`. An enumerated list of every public version was rejected, since each new model would read `<family>-other` until the tool is updated.
+- One public revision token (`v` plus one or two digits) is allowed, and cloud-provider forms of a model id reduce to the plain id before the rule runs (ruling, final review).
+
+**Final-review payload changes** (ruling, final review):
+- Added: `repoSignals` (the repo pass status); each component's `window`; `stack` and `risk` gain `window` and `n`; the five-field `exclusions` record; one `omitted` block that counts what each cap cut and every key that fell outside a vocabulary; the unscored `uncheckedCommandShare`.
+- Narrowed: labels are `P-` plus 4 to 16 hex digits; keyed hashes are exactly 16 hex; scores and interval ends lie in 1–99; a component's `z` within ±3; `activeDays` at most 7; forensic values carry per-kind decimals, a ratio at most 1000; model keys are a fixed point of `modelExportId`, or `fine-tuned`/`other`; the core version takes digits, dots and a short tag from a closed set.
+- **Revealed names.** A name is normalised to NFC and holds 1 to 64 code points, in any script. Letters and digits anywhere, and it starts with one; a space, `.`, `_` or `-`, never last. A combining mark follows a letter, a digit or a mark (at most 4 in a row); variation selectors, the grapheme joiner, slash-like overlays, symbol marks and enclosing marks are refused. No default-ignorable code point is accepted, tested first, except the two joiners: a joiner only after a letter of a script on a closed list of scripts that use joiners, between letters or marks, never twice in a row. The Tibetan syllable mark may stand between letters. A name shaped like a label or a keyed hash is refused, and the apostrophe, `+`, `#`, `&`, brackets and the comma stay refused. A stated residual is accepted: a joiner between two consonants of a listed script is invisible, so a revealed name can carry a few hidden bytes.
 
 **Tool names.** Tool-call names are never exported; the payload carries categories, checks and toolchains only. That is how "tool names → built-ins only" holds.
 
@@ -2252,6 +2291,8 @@ This task runs in two parts (ruling, Task 15). **15a** is the pacer, `ScanOption
   - Signature: `new GcPacer({ checkEvery: number /* 8 MiB */; minRss: number /* 384 MiB */; slack: number /* 128 MiB */ }, collect, rss)`.
   - It checks RSS every `checkEvery` bytes streamed.
   - It collects when `rss > minRss` and `rss − rssAfterLastCollect > slack`, then sets `rssAfterLastCollect = rss()`.
+  - **The fallback** (ruling, Task 16b). The allocator keeps the pages a collection frees, so RSS after a collection is often no measure of live memory, and the adaptive rule alone let the peak ratchet up by `slack` per collection. A collection whose RSS fell by less than half of the growth it answered "did not fall"; from the first such collection, the pacer also collects every `fallbackEvery` bytes streamed (default 16 MiB; a larger step left a real scan near the budget), above `minRss`. The fallback lasts until a new phase: a look at or below `minRss`, or `newPhase()`, which the first hold of a new scan calls, so a long-lived process does not pay a full collection per step forever. Signature: `new GcPacer({ checkEvery, minRss, slack, fallbackEvery? }, collect, rss)`, with `newPhase(): void` and `settle(): void`.
+  - **The end of a scan** (ruling, Task 16b): `settle()` runs one collection when the pacer is enabled and RSS is above `minRss`, and it counts in `scan.gc`.
   - On every reading, the baseline drops to the reading when the reading is lower. After RSS falls (a store released), growth is measured from the low mark, never from a stale high one (ruling, Task 15a).
   - `enabled: boolean` is an instance field.
   - `collections` is a read-only counter.
@@ -2262,7 +2303,7 @@ This task runs in two parts (ruling, Task 15). **15a** is the pacer, `ScanOption
   - It builds a deterministic mix directly in memory, with no files, of exactly `events` events.
   - The mix uses sessions with subagents, human prompts, tools, usage, anchors, markers and turns, in Claude Code-like proportions, plus `RepoSignals`.
   - Sessions keep a fixed spacing, so the concurrent-session mix is the same at every size; coverage events carry the source's real record count and at least 1 file; `startedAt` precedes `finishedAt` (ruling, Task 15a).
-- **The pacer rule is under revision** (ruling, memory budget). The 1 GiB peak-RSS budget stands: it is the plan's acceptance bar. The adaptive pacer's collection rule above is being revised against it.
+- **The budget stands** (ruling, memory budget). The 1 GiB peak-RSS budget is the plan's acceptance bar. The adaptive rule alone did not meet it at real scale, so the pacer gained the fallback and the end-of-scan collection above (ruling, Task 16b).
 - **Compact session index** (ruling, Task 15b). The 25% bound and its meaning stay as written: the store's per-session index is not counted as "store", and it is not released after `analyze`, since the next consumer would rebuild it. Instead the index `forSession` builds is compact, because it lives as long as the store: one number per distinct session id, and per kind a table of the kind list's positions grouped by session. `forSession` keeps its exact behaviour: the same event objects (identity matters to `isHuman`), in the same order, built lazily on first use and dropped by `add`.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -2276,7 +2317,8 @@ This task runs in two parts (ruling, Task 15). **15a** is the pacer, `ScanOption
   - `scale.test.ts`:
     - **Default (300,000 events):**
       - after `Bun.gc(true)`, `analyze` retains at most 25% of the store's heap, measured as the delta in `heapUsed` before and after with the result held;
-      - it runs in ≤ 5 s locally, and ≤ 30 s when `CI` is exactly `"true"`, since a shared runner is several times slower (ruling, Task 15b);
+      - it runs in at most 30 s, a runaway guard on every machine. The first bound was 5 s locally and 30 s when `CI` is exactly `"true"` (ruling, Task 15b); a wall-clock bound that fails under load is a flake (ruling, final review);
+      - each reading is taken in a child process of its own, which is killed just inside the test's timeout, so another test's heap never enters it (ruling, final review);
       - the export is ≤ 300 KB.
     - **Sanity bounds** (ruling, Task 15b): the retained delta is above 0, and the store costs between 50 and 500 bytes per event, so a skipped collection or a shrunken store cannot pass silently. The kinds whose strings are flattened are read from the store, not hard-coded.
     - **`SLOW=1` (3,000,000 events):** the same 25% bound, and ≤ 30 s. This test runs locally only and writes no files.
@@ -2313,7 +2355,7 @@ This task runs in two parts (ruling, Task 16). **Part 1** is Steps 1–4: the in
   - there are not exactly 7 dimension entries: the `/7` is fixed (ruling, Task 16);
   - scan plus analyze takes more than 60 s;
   - peak RSS exceeds 1 GiB.
-- `not-saturated` passes when every scored dimension with a display score of 99 carries `openTail` (scores are clamped to [1, 99], so none can read 100). Every displayed 99 sets `openTail` (pre-flight P16), so this line guards that invariant. It also fails on any score above 99: the acceptance lines must not pass on a broken engine (ruling, Task 16).
+- `not-saturated` fails when a scored dimension lies outside 1 to 99 or a 99 lacks `openTail`, and, from 3 scored dimensions, when every one sits at 1 or 99. `dimensions-scored` fails when nothing is scored although the scan holds 100 or more detail sessions with typed turns (ruling, final review). `not-saturated` passes when every scored dimension with a display score of 99 carries `openTail` (scores are clamped to [1, 99], so none can read 100). Every displayed 99 sets `openTail` (pre-flight P16), so this line guards that invariant. It also fails on any score above 99: the acceptance lines must not pass on a broken engine (ruling, Task 16).
 - **One metric-metadata walker** (ruling, Task 16), `metricMetaProblems(a: Analysis): { metrics: number; bad: string[] }` in `scripts/smoke-local.ts`, shared by the smoke and the integration test. Every `meta` object, every object carrying a `window` key, and every metric is metric metadata, except the analysis's own `meta` and the coverage and exposure per-tool rows. Each needs a valid window, a finite `n` and an array `sources`; a present-but-undefined `value` counts as bad. The places the types require a `meta` are checked by name, so missing metadata is found too.
 
 - [ ] **Step 1: Write the failing integration test.**
